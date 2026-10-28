@@ -48,6 +48,7 @@ static u16 raw_code(u8 sc, int was_ext)
 void kbd_irq(void)
 {
     u8 sc = inb(0x60);
+    random_event(sc);
     if (sc == 0xE0) {
         ext = 1;
         return;

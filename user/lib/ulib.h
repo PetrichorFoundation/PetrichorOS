@@ -69,6 +69,16 @@ int inet_aton(const char *s, u32 *ip);
 const char *inet_ntoa(u32 ip);
 int resolve(const char *name, u32 *ip);
 int url_split(const char *url, char *host, int hostsz, int *port, const char **path);
+/* TLS-capable connections and GET (user/lib/https.c); only programs linked with $(TLSLIB) may use these */
+struct tls;
+struct conn {
+    int fd;
+    struct tls *tls;
+};
+int conn_open(struct conn *c, const char *host, int port, int https, int flags, const char **err);   /* flags: TLS_INSECURE */
+int conn_read(struct conn *c, void *buf, int n);
+int conn_write(struct conn *c, const void *buf, int n);
+void conn_close(struct conn *c);
 int http_get(const char *url, char **body, int *len);   /* body is malloc'd, NUL-terminated */
 void url_resolve(const char *base, const char *ref, char *out, int outsz);   /* ref relative to base, "../" aware */
 int read_line(int fd, char *buf, int max);   /* returns length, or -1 at EOF */

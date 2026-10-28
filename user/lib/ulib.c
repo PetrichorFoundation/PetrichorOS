@@ -139,6 +139,7 @@ const char *strerror(int err)
     switch (err) {
     case 0: return "success";
     case EPERM: return "operation not permitted";
+    case EPROTO: return "secure connection failed";
     case ENOENT: return "no such file or directory";
     case ESRCH: return "no such process";
     case EINTR: return "interrupted";

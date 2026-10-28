@@ -16,12 +16,15 @@ ASFLAGS := $(TARGET) -Iinclude -I$B
 LDFLAGS := -m elf_i386 -z max-page-size=4096 -z noexecstack
 
 # ---- kernel ----
-KSRC := $(wildcard kernel/*.c) lib/string.c lib/format.c
+KSRC := $(wildcard kernel/*.c) lib/string.c lib/format.c lib/sha256.c
 KASM := kernel/boot.S kernel/isr.S kernel/initrd.S
 KOBJ := $(patsubst %.c,$B/%.o,$(KSRC)) $(patsubst %.S,$B/%.o,$(KASM))
 
 # ---- userland ----
 ULIB := $B/user/lib/ulib.o $B/user/lib/net.o $B/user/lib/http.o $B/lib/sha256.o $B/user/lib/usys.o $B/lib/string.o $B/lib/format.o
+# TLS (HTTPS) is linked only into the programs that talk to web servers.
+TLSLIB := $(addprefix $B/user/lib/,https.o $(addprefix tls/,hash.o gcm.o bn.o ec.o rsa.o x509.o tls.o))
+TLSBINS := fetch wget ppm
 UBIN := $(patsubst user/bin/%.c,%,$(wildcard user/bin/*.c))
 UEXE := $(addprefix $B/user/out/,$(UBIN))
 
@@ -55,7 +58,8 @@ $B/%.o: %.S
 
 $B/user/out/%: $B/user/bin/%.o $(ULIB) user/user.ld
 	@mkdir -p $(dir $@)
-	$(LD) $(LDFLAGS) -T user/user.ld -o $@ $< $(ULIB)
+	$(LD) $(LDFLAGS) -T user/user.ld -o $@ $(filter %.o,$^)
+$(addprefix $B/user/out/,$(TLSBINS)): $(TLSLIB)
 
 # ---- packages and the package repository ----
 # packages/<name>/package (VERSION, DEPS, DESC), src/*.c -> bin/<prog>, files/ copied as-is.

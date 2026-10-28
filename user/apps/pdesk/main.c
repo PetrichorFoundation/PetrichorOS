@@ -1220,7 +1220,28 @@ void about_open(void)
 
 /* ---------------- main loop ---------------- */
 
-int main(void)
+static void gallery_draw(struct win *w, struct rect c)
+{
+    gfx_fill(c.x, c.y, c.w, c.h, RGB(0x5a, 0x66, 0x74));
+    static const int sizes[] = {64, 48, 32, 20, 16};
+    for (int k = 0; k < ICON_COUNT; k++) {
+        int col = k % 8, row = k / 8, x0 = c.x + 10 + col * 112, y0 = c.y + 10 + row * 150;
+        gfx_fill(x0 - 4, y0 - 4, 108, 146, k % 2 ? RGB(0x66, 0x72, 0x80) : RGB(0xe8, 0xeb, 0xee));
+        icon_draw(k, x0, y0, 64);
+        int x = x0;
+        for (int i = 1; i < 5; i++) {
+            icon_draw(k, x, y0 + 72 + (i == 1 ? 0 : 0), sizes[i]);
+            x += sizes[i] + 4;
+        }
+        char t[8];
+        snprintf(t, sizeof t, "%d", k);
+        gfx_text(x0, y0 + 124, t, k % 2 ? C_WHITE : C_TEXT);
+    }
+}
+
+static const struct app gallery_app = {.draw = gallery_draw};
+
+int main(int argc, char **argv)
 {
     int e = fbmap(&fb, SCREEN_W, SCREEN_H);
     if (e < 0) {
@@ -1253,6 +1274,10 @@ int main(void)
     build_menus();
     render_wallpaper();
     sample_tray();
+    if (argc > 1 && !strcmp(argv[1], "--icons")) {            /* development aid: show every icon */
+        struct win *g = wm_open(&gallery_app, 920, 520, "Icon gallery", NULL);
+        if (g) { g->x = 50; g->y = 40; }
+    }
     invalidate(0, 0, SCREEN_W, SCREEN_H);
     repaint();
 

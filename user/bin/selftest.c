@@ -237,6 +237,12 @@ static void test_scripts_poll_clock(void)
     struct rtc_time t;
     CHECK(gettime(&t) == 0 && t.year >= 2024 && t.month >= 1 && t.month <= 12 && t.hour < 24 && t.min < 60,
           "RTC returns a plausible date");
+
+    u8 a[32], b[32], zero[32] = {0};
+    int rf = open("/dev/random", O_RDONLY);
+    CHECK(rf >= 0 && read(rf, a, 32) == 32 && read(rf, b, 32) == 32, "/dev/random reads");
+    CHECK(memcmp(a, b, 32) && memcmp(a, zero, 32), "/dev/random output varies");
+    close(rf);
 }
 
 static void test_raw_disk(void)

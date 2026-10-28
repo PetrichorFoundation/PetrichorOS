@@ -149,6 +149,7 @@
 #define ECONNRESET   104
 #define EISCONN      106
 #define ENOTCONN     107
+#define EPROTO       71
 #define ETIMEDOUT    110
 #define ECONNREFUSED 111
 #define EHOSTUNREACH 113

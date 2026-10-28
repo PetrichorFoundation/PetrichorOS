@@ -146,17 +146,35 @@ XFCE-style desktop, written from scratch on top of the framebuffer and input dev
   and About
 - needs QEMU's default VGA (`-vga std`); other graphics hardware isn't supported yet
 
-**Web browser** (`user/apps/pdesk/browser.c`, `html.c`; `fetch` for loading). Opens plain `http://` pages
-and local `file://` pages (including directory listings; `.html` files open here from the File
+**Web browser** (`user/apps/pdesk/browser.c`, `html.c`; `fetch` for loading). Opens `http://` and
+`https://` pages (a padlock marks a verified connection) and local `file://` pages (including directory listings; `.html` files open here from the File
 Manager). Pages load in a background `fetch` process, which follows redirects and decodes chunked
 responses, so the desktop never freezes. The renderer is written from scratch: headings, paragraphs,
 bold/italic/code, links, nested bulleted and numbered lists, simple tables, preformatted text,
 blockquotes, centered text, entities and common UTF-8 punctuation, with wrapping that follows the
 window size. There is an address bar (bare names like `example.com` work), back/forward/reload/stop,
-home, link hover URLs in the status bar and a draggable scrollbar. Not supported: **HTTPS** (there is no
-TLS, so https:// pages show an explanation and many sites won't load), images (shown as
-`[image: alt]`), CSS, JavaScript, forms that submit, and cookies. It was tested against a local server
-(redirects, chunked, 404) and real plain-HTTP sites such as example.com.
+home, link hover URLs in the status bar and a draggable scrollbar. Not supported: images (shown as
+`[image: alt]`), CSS, JavaScript, forms that submit, and cookies, so many modern sites are only partly
+usable. It was tested against a local server (redirects, chunked, 404) and real sites over HTTP and
+HTTPS (example.com, Wikipedia, GitHub, Google, Amazon, Cloudflare).
+
+**HTTPS** (`user/lib/tls/`). A TLS 1.2 client written from scratch, with no third-party code: SHA-2,
+HMAC and the TLS PRF, AES-128/256-GCM, big-integer arithmetic (Montgomery), RSA PKCS#1 v1.5 and ECDSA
+signature checks, ECDHE on P-256 and P-384, and an X.509 parser. Cipher suites: `ECDHE_{RSA,ECDSA}_WITH_AES_{128,256}_GCM`,
+with extended master secret when the server offers it. Servers are verified for real: the chain must
+lead to one of the 157 trusted roots in `/etc/ssl/roots.bin` (extracted from the macOS system keychain
+by `tools/mkroots.py`; run it again to refresh the list), signatures, validity dates (the clock is
+read from the RTC; a day of slack tolerates a clock kept in local time), CA flags and path length, key
+usage, and the host name (subjectAltName, wildcards, IP addresses). Expired, self-signed, untrusted and
+wrong-host certificates are refused with a readable reason (checked against badssl.com). Extra roots
+for a private server go in `/etc/ssl/extra.bin` (`tools/mkroots.py rootfs/etc/ssl/extra.bin my.pem`).
+`fetch`, `wget` and `ppm` speak HTTPS; the TLS code is linked only into those programs. `fetch -k` and
+`wget -k` skip certificate checks for testing. Limits: TLS 1.2 only (no TLS 1.3, so a server that
+refuses 1.2 can't be reached), no ChaCha20, no session resumption, no client certificates, no
+revocation checking (CRL/OCSP), no RSA-PSS certificate signatures, and the X.509 name matching is a
+byte comparison. Big-integer code is not constant-time. Randomness comes from `/dev/random`: a
+SHA-256 pool stirred by RDRAND (where the CPU has it) and by timing jitter from interrupts, which is
+solid on real hardware but weaker under an emulator without RDRAND.
 
 **Package manager** (`ppm`). Packages are `.ppk` archives served over HTTP from a repository whose
 `index` lists name, version, size, SHA-256 and dependencies. `ppm update | search | info |
@@ -166,7 +184,13 @@ package that others need, and the shell finds programs in `/bin` and `/disk/bin`
 `tools/mkppk` builds packages; `make repo` builds the sample repository from `packages/`
 (`cowsay`, `fortune`, `lolcow`, `calc`, `hd`); `make serve-repo` serves it.
 
-**Userland** (`user/`): a tiny libc (`printf`, `malloc`, DNS resolver, HTTP client, SHA-256, a 2D
+**Icons.** The desktop's icons are drawn at run time by a small anti-aliased vector rasterizer
+(`user/apps/pdesk/icons.c`: rounded rectangles, ellipses, polygons, gradients, soft shadows) into a
+64x64 master that is cached and box-filtered to each requested size, so they stay crisp at any size.
+File Manager shows type-specific icons (folders, text, code, web, archives, programs).
+`pdesk --icons` opens a gallery of all of them.
+
+**Userland** (`user/`): a tiny libc (`printf`, `malloc`, DNS resolver, HTTP/HTTPS client, SHA-256, a 2D
 graphics library with an 8x16 font), `init`, and `sh` (pipes, `<` `>` `>>`, `;`, `&`, quoting,
 scripts, `cd`), plus
 `ls cat echo mkdir rm touch cp mv pwd ps uname uptime clear kill sleep wc grep head free df halt reboot hello selftest`,
@@ -182,7 +206,8 @@ include/    abi.h: the syscall/errno/struct contract between kernel and user
 user/       libc (user/lib), programs (user/bin) and multi-file apps such as the desktop (user/apps)
 packages/   sample packages for the repository (package metadata, sources, data files)
 rootfs/     files copied into the root filesystem (/etc/motd, ...)
-tools/      host tools: mkinitrd (root image), mkdisk (bootloader + kernel -> disk image), mkppk (packages)
+tools/      host tools: mkinitrd (root image), mkdisk (bootloader + kernel -> disk image), mkppk (packages),
+            mkroots.py (trusted roots for HTTPS), gen_crypto_tables.py (SHA-512/AES tables)
 ```
 
 ## Design notes
@@ -200,10 +225,13 @@ tools/      host tools: mkinitrd (root image), mkdisk (bootloader + kernel -> di
 
 ## Testing
 
-`selftest` (run inside Petrichor) performs 85 end-to-end checks of files, directories, the on-disk
+`selftest` (run inside Petrichor) performs 87 end-to-end checks of files, directories, the on-disk
 filesystem (including a 100 KiB file across indirect blocks), raw disks, devices, sockets, `#!` scripts,
 `poll`, the clock, fork/exec/wait/kill, pipes (including blocking on a full pipe), the heap, and a
-physical-memory leak check across repeated fork/exit. Checks that need a disk or NIC are skipped
+physical-memory leak check across repeated fork/exit. The crypto primitives were checked on the host
+against OpenSSL and Python's `hashlib`/`hmac` (hashes, HMAC, PRF, GCM vectors, ECDH, ECDSA and RSA
+signatures including tampered ones); the TLS client was tested against live sites, `openssl s_server`
+(AES-128/256, RSA and ECDSA certificates, with and without extended master secret) and badssl.com. Checks that need a disk or NIC are skipped
 if none is attached. The desktop, installer, boot menu and package manager were tested by driving
 QEMU's monitor (injected mouse/keys plus screenshots), a two-disk setup, and a host HTTP server.
 
@@ -219,11 +247,11 @@ read once it is running). The network stack has no DHCP (static QEMU addresses),
 TCP listen/accept or window-based flow control, and only the RTL8139 is supported. The desktop needs a
 1024x768 32-bit VESA mode and runs in a single process (apps are built in rather than separate
 clients of a window server). Terminal lines don't reflow when a window is resized. `ppm` has no
-package signatures beyond SHA-256 in the index, and the repository is plain HTTP. There are no real
+package signatures beyond SHA-256 in the index (the repository can now be served over HTTPS). There are no real
 signals (`kill` terminates) and no copy-on-write `fork`. The bitmap font is the standard VGA text-mode
 font as rendered by QEMU's VGA BIOS (LGPL-licensed); swap in your own if you need different terms.
 
-Natural next steps: TLS/HTTPS and image decoding for the browser, UEFI boot (and GPT), USB (xHCI) keyboard/mouse/storage drivers, more NICs (e1000,
+Natural next steps: TLS 1.3 and image decoding for the browser, UEFI boot (and GPT), USB (xHCI) keyboard/mouse/storage drivers, more NICs (e1000,
 RTL8168), AHCI/NVMe interrupts and multiple queues, selectable display modes, partitioning and
 dual-boot in the installer, a window-server protocol, DHCP and `listen`/`accept`, a journal, signed
 packages, real signals, a 64-bit port.

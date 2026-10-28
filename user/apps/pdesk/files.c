@@ -194,6 +194,31 @@ static void delete_sel(struct files *f)
         reload(f);
 }
 
+/* Picks an icon from the file's name (and folder). */
+static int entry_icon(struct files *f, const struct fent *e)
+{
+    if (e->type == T_DIR)
+        return ICON_FOLDER;
+    if (e->type == T_DEV)
+        return ICON_DISK;
+    const char *n = e->name, *dot = strrchr(n, '.');
+    static const char *const web[] = {"html", "htm", "xhtml"};
+    static const char *const code[] = {"c", "h", "S", "py", "js", "css", "json", "sh", "ld", "mk", "rs", "go"};
+    static const char *const text[] = {"txt", "md", "conf", "cfg", "log", "csv", "ini"};
+    static const char *const arch[] = {"ppk", "zip", "tar", "gz", "img", "iso", "bin"};
+    if (dot && dot[1]) {
+        for (u32 i = 0; i < sizeof web / sizeof *web; i++) if (!strcmp(dot + 1, web[i])) return ICON_FILE_WEB;
+        for (u32 i = 0; i < sizeof code / sizeof *code; i++) if (!strcmp(dot + 1, code[i])) return ICON_FILE_CODE;
+        for (u32 i = 0; i < sizeof text / sizeof *text; i++) if (!strcmp(dot + 1, text[i])) return ICON_FILE_TEXT;
+        for (u32 i = 0; i < sizeof arch / sizeof *arch; i++) if (!strcmp(dot + 1, arch[i])) return ICON_FILE_ARCHIVE;
+    }
+    if (!strcmp(f->path, "/bin") || !strcmp(f->path, "/disk/bin"))
+        return ICON_EXEC;
+    if (!strncmp(f->path, "/etc", 4) || !strcmp(n, "motd") || !strcmp(n, "README"))
+        return ICON_FILE_TEXT;
+    return ICON_FILE;
+}
+
 /* ---------------- drawing ---------------- */
 
 static void fmt_size(char *buf, int n, u32 sz)
@@ -251,7 +276,7 @@ static void files_draw(struct win *w, struct rect c)
             gfx_fill(lx, y, lw, ROW_H, C_ACCENT);
         else if (r & 1)
             gfx_fill(lx, y, lw, ROW_H, RGB(0xf5, 0xf7, 0xf9));
-        icon_draw(e->type == T_DIR ? ICON_FOLDER : e->type == T_DEV ? ICON_DISK : ICON_FILE, lx + 6, y + 1, 20);
+        icon_draw(entry_icon(f, e), lx + 6, y + 1, 20);
         u32 tc = i == f->sel ? C_WHITE : C_TEXT;
         gfx_text(lx + 32, y + 3, e->name, tc);
         if (e->type == T_FILE) {

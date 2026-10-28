@@ -2,7 +2,6 @@
 #include "kernel.h"
 
 static struct file ftable[NFILE];
-static u32 rng_state;
 
 struct file *file_alloc(void)
 {
@@ -106,18 +105,9 @@ static int dev_read(struct inode *ip, void *dst, u32 n)
     case DEV_ZERO:
         memset(dst, 0, n);
         return n;
-    case DEV_RANDOM: {
-        u8 *p = dst;
-        if (!rng_state)
-            rng_state = ticks * 2654435761u | 1;
-        for (u32 i = 0; i < n; i++) {
-            rng_state ^= rng_state << 13;
-            rng_state ^= rng_state >> 17;
-            rng_state ^= rng_state << 5;
-            p[i] = rng_state >> 8;
-        }
+    case DEV_RANDOM:
+        random_bytes(dst, n);
         return n;
-    }
     }
     return -ENODEV;
 }
@@ -128,9 +118,11 @@ static int dev_write(struct inode *ip, const void *src, u32 n)
     case DEV_CONSOLE:
         console_write(src, n);
         return n;
+    case DEV_RANDOM:
+        random_add(src, n);                     /* whatever is written is stirred into the pool */
+        return n;
     case DEV_NULL:
     case DEV_ZERO:
-    case DEV_RANDOM:
         return n;
     }
     return -ENODEV;

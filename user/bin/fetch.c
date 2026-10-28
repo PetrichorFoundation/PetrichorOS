@@ -1,10 +1,11 @@
-/* fetch URL: download a page over plain HTTP for the browser.
+/* fetch [-k] URL: download a page over HTTP or HTTPS for the browser.
  *
  * Output (stdout):   STATUS 200 / URL <final url> / TYPE <content-type> / blank line / body
  *               or:  ERROR <message>
  * Follows up to 8 redirects, decodes chunked transfer encoding, times out stalled servers.
- * HTTPS isn't supported (there is no TLS); a redirect to https:// is reported as an error. */
+ * HTTPS servers are verified against /etc/ssl/roots.bin; -k skips that check (testing only). */
 #include <ulib.h>
+#include "tls/tls.h"
 
 #define MAX_BODY (4 * 1024 * 1024)
 
@@ -70,8 +71,14 @@ static int dechunk(char *b, int len)
 
 int main(int argc, char **argv)
 {
+    int flags = 0;
+    if (argc == 3 && !strcmp(argv[1], "-k")) {
+        flags = TLS_INSECURE;
+        argv++;
+        argc--;
+    }
     if (argc != 2)
-        return fail("usage: fetch URL", NULL);
+        return fail("usage: fetch [-k] URL", NULL);
     char url[512];
     safestrcpy(url, argv[1], sizeof url);
 
@@ -79,9 +86,8 @@ int main(int argc, char **argv)
         char *hash = strchr(url, '#');
         if (hash)
             *hash = 0;
-        if (!strncmp(url, "https://", 8))
-            return fail("this browser can't open HTTPS pages (there is no TLS support yet)", url);
-        if (strncmp(url, "http://", 7))
+        int https = !strncmp(url, "https://", 8);
+        if (!https && strncmp(url, "http://", 7))
             return fail("unsupported address", url);
 
         char host[128];
@@ -89,23 +95,17 @@ int main(int argc, char **argv)
         int port;
         if (url_split(url, host, sizeof host, &port, &path) < 0)
             return fail("bad address", url);
-        u32 ip;
-        int e = resolve(host, &ip);
+        struct conn c;
+        const char *err;
+        int e = conn_open(&c, host, port, https, flags, &err);
         if (e < 0)
-            return fail("can't find the server", host);
-        int fd = socket(SOCK_STREAM);
-        if (fd < 0 || (e = connect(fd, ip, port)) < 0) {
-            close(fd);
-            return fail(e == -ECONNREFUSED ? "connection refused" : e == -ETIMEDOUT ? "connection timed out" : "can't connect",
-                        host);
-        }
-        settimeout(fd, 15000);
+            return fail(err, host);
         char req[768];
         int n = snprintf(req, sizeof req,
                          "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: Petrichor/0.1 (pbrowse)\r\n"
                          "Accept: text/html,text/plain;q=0.9,*/*;q=0.5\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
                          path, host);
-        if (write(fd, req, n) < 0)
+        if (conn_write(&c, req, n) < 0)
             return fail("can't send the request", NULL);
 
         int cap = 16384, used = 0, hdr_end = -1, content_len = -1;
@@ -119,7 +119,7 @@ int main(int argc, char **argv)
                     break;
                 buf = nb;
             }
-            int r = read(fd, buf + used, cap - used - 1);
+            int r = conn_read(&c, buf + used, cap - used - 1);
             if (r < 0) {
                 if (used == 0)
                     return fail(r == -ETIMEDOUT ? "the server didn't answer" : "connection lost", host);
@@ -140,7 +140,7 @@ int main(int argc, char **argv)
             if (hdr_end >= 0 && content_len >= 0 && used - hdr_end >= content_len)
                 break;                                   /* we have it all; don't wait for the server to close */
         }
-        close(fd);
+        conn_close(&c);
         if (!buf || hdr_end < 0)
             return fail("the server sent an invalid response", host);
         buf[used] = 0;

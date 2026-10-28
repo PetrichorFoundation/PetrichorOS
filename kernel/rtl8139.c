@@ -92,6 +92,7 @@ void nic_irq(void)
 {
     u16 isr = inw(io + REG_ISR);
     outw(io + REG_ISR, isr);                            /* acknowledge */
+    random_event(isr);
     if (!(isr & ISR_ROK))
         return;
     while (!(inb(io + REG_CMD) & CMD_BUFE)) {

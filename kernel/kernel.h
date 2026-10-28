@@ -294,6 +294,10 @@ void pci_write(u32 bus, u32 slot, u32 fn, u32 off, u32 v);
 int tty_ready(void);
 void tty_input(char c);
 int tty_read(char *buf, u32 n);
+void random_init(void);
+void random_event(u32 v);                       /* stir interrupt timing into the pool */
+void random_add(const void *data, u32 n);
+void random_bytes(void *dst, u32 n);
 void kbd_init(void);
 void kbd_irq(void);
 

@@ -21,6 +21,7 @@ struct browser {
     int hpos, hcount;
     char addr[512];
     int alen, addr_focus, addr_sel;
+    int secure;                                 /* the page on screen came over a verified HTTPS connection */
     int scroll, restore_scroll;
     int hover;
     int loading, rfd, pid;
@@ -33,12 +34,14 @@ struct browser {
 static const char home_html[] =
     "<html><head><title>Petrichor Browser</title></head><body>"
     "<h1>Petrichor Web Browser</h1>"
-    "<p>A small web browser written from scratch for Petrichor. It reads plain "
-    "<b>http://</b> pages: headings, text, lists, tables and links. There is no HTTPS (the system has no "
-    "encryption support yet), no images, and no JavaScript, so many modern sites won't work.</p>"
+    "<p>A small web browser written from scratch for Petrichor. It opens <b>http://</b> and "
+    "<b>https://</b> pages (certificates are checked against the built-in list of trusted authorities) and shows "
+    "headings, text, lists, tables and links. There are no images and no JavaScript, so many modern sites "
+    "won't work.</p>"
     "<h2>Try these</h2>"
     "<ul>"
-    "<li><a href=\"http://example.com/\">example.com</a>: the classic example page</li>"
+    "<li><a href=\"https://example.com/\">example.com</a>: the classic example page, over HTTPS</li>"
+    "<li><a href=\"https://en.wikipedia.org/wiki/Petrichor\">Wikipedia: Petrichor</a>: a big real page</li>"
     "<li><a href=\"http://neverssl.com/\">neverssl.com</a>: a plain-HTTP test site</li>"
     "<li><a href=\"http://info.cern.ch/\">info.cern.ch</a>: the first website, still online</li>"
     "<li><a href=\"file:///etc/demo.html\">The demo page</a>: shows what the renderer can do</li>"
@@ -81,6 +84,7 @@ static void update_title(struct browser *b)
 
 static void show_html(struct browser *b, const char *url, const char *html, int len)
 {
+    b->secure = 0;
     page_clear(&b->page);
     safestrcpy(b->page.url, url, sizeof b->page.url);
     html_parse(&b->page, html, len);
@@ -95,6 +99,7 @@ static void show_html(struct browser *b, const char *url, const char *html, int 
 
 static void show_message(struct browser *b, const char *url, const char *headline, const char *detail)
 {
+    b->secure = 0;
     char d[400], u[600], html[1400];
     esc(d, sizeof d, detail);
     esc(u, sizeof u, url);
@@ -266,10 +271,6 @@ static void navigate(struct browser *b, const char *input, int push)
         show_html(b, url, home_html, sizeof home_html - 1);
     } else if (!strncmp(url, "file://", 7)) {
         load_file(b, url);
-    } else if (!strncmp(url, "https://", 8)) {
-        show_message(b, url, "HTTPS isn't supported yet",
-                     "This browser has no encryption (TLS), so it can only open http:// pages. "
-                     "Many sites only work over HTTPS. Try a plain-HTTP site from the home page.");
     } else {
         start_fetch(b, url);
     }
@@ -290,6 +291,7 @@ static void finish_load(struct browser *b)
         if (nl)
             *nl = 0;
         show_message(b, req_url, "Can't open the page", buf + 6);
+        safestrcpy(b->status, "Failed", sizeof b->status);
         goto done;
     }
     int status = 0;
@@ -318,10 +320,12 @@ static void finish_load(struct browser *b)
     safestrcpy(b->hist[b->hpos].url, url, sizeof b->hist[0].url);     /* the final URL after redirects */
     if (strstr(type, "html") || (!strstr(type, "text/plain") && blen > 0 && strchr(body, '<') && !strstr(type, "image"))) {
         show_html(b, url, body, blen);
+        b->secure = !strncmp(url, "https://", 8);
     } else if (!strncmp(type, "text/", 5)) {
         page_clear(&b->page);
         safestrcpy(b->page.url, url, sizeof b->page.url);
         text_parse(&b->page, body, blen);
+        b->secure = !strncmp(url, "https://", 8);
         safestrcpy(b->addr, url, sizeof b->addr);
         b->alen = strlen(b->addr);
         b->scroll = b->restore_scroll;
@@ -409,9 +413,18 @@ static void br_draw(struct win *w, struct rect c)
 
     int ax = c.x + 140, aw = c.w - 148;
     ui_panel_inset(ax, c.y + 6, aw, 26);
-    int vis = (aw - 16) / 8;
+    int lock = b->secure ? 18 : 0;
+    int vis = (aw - 16 - lock) / 8;
     const char *show = b->alen > vis ? b->addr + b->alen - vis : b->addr;
-    int tx = ax + 8;
+    int tx = ax + 8 + lock;
+    if (b->secure) {                                           /* padlock: a verified HTTPS connection */
+        int lx = ax + 8, ly = c.y + 13;
+        gfx_frame(lx + 2, ly, 7, 7, RGB(0x2d, 0x7a, 0x3a));
+        gfx_vline(lx + 3, ly + 1, 6, RGB(0x2d, 0x7a, 0x3a));
+        gfx_vline(lx + 7, ly + 1, 6, RGB(0x2d, 0x7a, 0x3a));
+        gfx_fill(lx, ly + 6, 11, 9, RGB(0x2d, 0x7a, 0x3a));
+        gfx_fill(lx + 5, ly + 9, 1, 3, RGB(0xe8, 0xf4, 0xea));
+    }
     if (b->addr_focus && b->addr_sel)
         gfx_fill(tx - 1, c.y + 9, (int)strlen(show) * 8 + 2, 20, g_accent);
     gfx_text(tx, c.y + 11, show, b->addr_focus && b->addr_sel ? C_WHITE : C_TEXT);

@@ -103,6 +103,29 @@ void gfx_copy(const u32 *src, int x, int y, int w, int h)
     }
 }
 
+void gfx_blit_argb(const u32 *src, int x, int y, int w, int h)
+{
+    struct rect r = rect_isect((struct rect){x, y, w, h}, clip);
+    for (int row = 0; row < r.h; row++) {
+        const u32 *s = src + (r.y - y + row) * w + (r.x - x);
+        u32 *d = tgt + (r.y + row) * tw + r.x;
+        for (int i = 0; i < r.w; i++) {
+            u32 p = s[i], a = p >> 24;
+            if (a == 0)
+                continue;
+            if (a == 255) {
+                d[i] = p & 0xFFFFFF;
+                continue;
+            }
+            u32 inv = 255 - a, o = d[i];
+            u32 rr = ((p >> 16) & 255) + (((o >> 16) & 255) * inv + 127) / 255;
+            u32 gg = ((p >> 8) & 255) + (((o >> 8) & 255) * inv + 127) / 255;
+            u32 bb = (p & 255) + ((o & 255) * inv + 127) / 255;
+            d[i] = (rr > 255 ? 255 : rr) << 16 | (gg > 255 ? 255 : gg) << 8 | (bb > 255 ? 255 : bb);
+        }
+    }
+}
+
 void gfx_char(int x, int y, int ch, u32 fg)
 {
     if (ch < 32 || ch > 126)

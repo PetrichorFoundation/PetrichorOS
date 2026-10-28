@@ -125,6 +125,7 @@ void mouse_irq(void)
     static u8 pkt[4];
     static int n;
     u8 b = inb(0x60);
+    random_event(b);
     if (n == 0 && !(b & 0x08))
         return;                                 /* out of sync: wait for a header byte */
     pkt[n++] = b;

@@ -56,6 +56,7 @@ void kmain(u32 magic, u32 *mbi)
     gdt_init();
     idt_init();
     mem_init(kb * 1024);
+    random_init();
     if (bootinfo.fb_addr && bootinfo.fb_bpp == 32)
         console_use_fb();                       /* VGA text mode is gone: draw text on the framebuffer */
     storage_init();

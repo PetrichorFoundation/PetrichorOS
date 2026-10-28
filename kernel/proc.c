@@ -142,6 +142,7 @@ void wakeup(void *chan)
 void timer_tick(struct regs *r)
 {
     ticks++;
+    random_event(ticks);
     if (cur != &ptable[0])
         cur->cpu_ticks++;
     for (int i = 1; i < NPROC; i++) {
