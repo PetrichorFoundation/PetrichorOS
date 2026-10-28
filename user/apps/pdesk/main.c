@@ -442,7 +442,7 @@ static void draw_window(struct win *w, struct rect damage_clip)
 
 /* ---------------- actions and menus ---------------- */
 
-enum { A_TERM, A_FILES, A_EDIT, A_MON, A_SOFT, A_SETTINGS, A_RUN, A_INSTALL, A_ABOUT, A_CONSOLE,
+enum { A_WEB, A_TERM, A_FILES, A_EDIT, A_MON, A_SOFT, A_SETTINGS, A_RUN, A_INSTALL, A_ABOUT, A_CONSOLE,
        A_LOGOUT, A_RESTART, A_POWER, A_WALLPAPER, A_SEP };
 
 struct menu_item {
@@ -467,6 +467,7 @@ static void add_item(struct popup *p, const char *label, int icon, int action)
 static void build_menus(void)
 {
     app_menu.n = 0;
+    add_item(&app_menu, "Web Browser", ICON_WEB, A_WEB);
     add_item(&app_menu, "Terminal", ICON_TERM, A_TERM);
     add_item(&app_menu, "File Manager", ICON_FILES, A_FILES);
     add_item(&app_menu, "Text Editor", ICON_EDITOR, A_EDIT);
@@ -485,6 +486,7 @@ static void build_menus(void)
     add_item(&app_menu, "Shut Down", ICON_POWER, A_POWER);
 
     ctx_menu.n = 0;
+    add_item(&ctx_menu, "Web Browser", ICON_WEB, A_WEB);
     add_item(&ctx_menu, "Open Terminal", ICON_TERM, A_TERM);
     add_item(&ctx_menu, "File Manager", ICON_FILES, A_FILES);
     add_item(&ctx_menu, "Text Editor", ICON_EDITOR, A_EDIT);
@@ -571,6 +573,7 @@ static void popup_show(struct popup *p, int x, int y)
 static void launch(int action)
 {
     switch (action) {
+    case A_WEB:      browser_open(NULL); break;
     case A_TERM:     term_open(NULL); break;
     case A_FILES:    files_open("/"); break;
     case A_EDIT:     editor_open(NULL); break;
@@ -792,6 +795,7 @@ struct dock_item {
 };
 
 static const struct dock_item dock_items[] = {
+    {"Web Browser", ICON_WEB, A_WEB},
     {"Terminal", ICON_TERM, A_TERM},
     {"File Manager", ICON_FILES, A_FILES},
     {"Text Editor", ICON_EDITOR, A_EDIT},
@@ -799,7 +803,7 @@ static const struct dock_item dock_items[] = {
     {"Software", ICON_SOFTWARE, A_SOFT},
     {"Settings", ICON_SETTINGS, A_SETTINGS},
 };
-#define NDOCK 6
+#define NDOCK 7
 
 static struct rect dock_rect(void)
 {
@@ -915,7 +919,15 @@ static void on_move(void)
                 dh = i;
     if (dh != dock_hover) {
         dock_hover = dh;
-        invalidate(d.x, d.y - 30, d.w, d.h + 30);
+        invalidate(d.x - 120, d.y - 30, d.w + 240, d.h + 30);       /* the tooltip can overhang the dock */
+    }
+    if (!open_popup && !cal_open) {
+        struct win *hw = window_at(mx, my);
+        if (hw && hw->app->mouse && !rect_hit(dock_rect(), mx, my) && my >= PANEL_H) {
+            struct rect hc = wm_client(hw);
+            if (rect_hit(hc, mx, my))
+                hw->app->mouse(hw, mx - hc.x, my - hc.y, M_MOVE);
+        }
     }
     if (open_popup) {
         int mh = popup_index_at(open_popup, mx, my);

@@ -122,6 +122,23 @@ void icon_draw(int kind, int x, int y, int size)
         box(10, 10, 12, 2, C_WHITE); box(10, 10, 2, 12, C_WHITE);
         box(10, 20, 12, 2, C_WHITE); box(20, 14, 2, 8, C_WHITE);
         break;
+    case ICON_WEB: {                                        /* a globe */
+        for (int dy = -13; dy <= 13; dy++) {
+            int hw = 0;
+            while ((hw + 1) * (hw + 1) + dy * dy <= 13 * 13)
+                hw++;
+            box(16 - hw, 16 + dy, 2 * hw, 1, RGB(0x2f, 0x7a, 0xc8));
+        }
+        for (int dy = -11; dy <= 11; dy++) {                 /* continents */
+            int hw = 0;
+            while ((hw + 1) * (hw + 1) + dy * dy <= 11 * 11)
+                hw++;
+            if ((dy > -9 && dy < -3) || (dy > 2 && dy < 8))
+                box(16 - hw / 2 - 2, 16 + dy, hw - 1, 1, RGB(0x4c, 0xb0, 0x6a));
+        }
+        box(8, 8, 8, 2, RGB(0xe8, 0xf4, 0xff));              /* highlight */
+        break;
+    }
     case ICON_PALETTE:
         outline(2, 4, 28, 24, RGB(0x70, 0x78, 0x80), RGB(0xf4, 0xf5, 0xf6));
         box(6, 8, 9, 7, RGB(0x4a, 0x90, 0xd9)); box(17, 8, 9, 7, RGB(0x3f, 0xae, 0x72));

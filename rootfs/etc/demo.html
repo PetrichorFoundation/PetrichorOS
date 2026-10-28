@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+<head><title>Petrichor Browser Demo</title></head>
+<body>
+<h1>Browser demo page</h1>
+<p>This page shows what the <b>Petrichor</b> renderer can do. Text wraps to the window, so try resizing it.
+It handles <i>emphasis</i>, <b>bold text</b>, <code>inline code</code>, and entities like &amp;, &lt;tags&gt;,
+&copy; 2026, and &mdash; dashes.</p>
+
+<h2>Links</h2>
+<p>Go <a href="about:home">home</a>, <a href="file:///">browse the files</a>, or
+<a href="http://example.com/">visit example.com</a>. Relative links work too:
+<a href="demo.html#top">this page again</a>.</p>
+
+<h2>Lists</h2>
+<ul>
+  <li>Unordered item one</li>
+  <li>Item two, with a longer description that should wrap onto a second line when the window is narrow enough</li>
+  <li>Nested:
+    <ul><li>inner one</li><li>inner two</li></ul>
+  </li>
+</ul>
+<ol>
+  <li>First</li>
+  <li>Second</li>
+  <li>Third</li>
+</ol>
+
+<h3>A table</h3>
+<table>
+  <tr><th>Part</th><th>Written in</th><th>Lines</th></tr>
+  <tr><td>Kernel</td><td>C and assembly</td><td>about 6000</td></tr>
+  <tr><td>Desktop</td><td>C</td><td>about 4000</td></tr>
+</table>
+
+<h3>Preformatted text</h3>
+<pre>
+int main(void)
+{
+    puts("hello from a pre block");
+    return 0;
+}
+</pre>
+
+<blockquote>A blockquote is indented, like this one.</blockquote>
+<hr>
+<center><p>Centered text &bull; the end</p></center>
+<p><img src="logo.png" alt="a logo"> Images show as placeholders for now.</p>
+</body>
+</html>

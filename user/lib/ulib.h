@@ -69,5 +69,6 @@ int inet_aton(const char *s, u32 *ip);
 const char *inet_ntoa(u32 ip);
 int resolve(const char *name, u32 *ip);
 int url_split(const char *url, char *host, int hostsz, int *port, const char **path);
-int http_get(const char *url, char **body, int *len);   /* body is malloc'd, NUL-terminated */       /* dotted quad or DNS lookup; 0 or -errno */
+int http_get(const char *url, char **body, int *len);   /* body is malloc'd, NUL-terminated */
+void url_resolve(const char *base, const char *ref, char *out, int outsz);   /* ref relative to base, "../" aware */
 int read_line(int fd, char *buf, int max);   /* returns length, or -1 at EOF */

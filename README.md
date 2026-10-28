@@ -139,12 +139,24 @@ XFCE-style desktop, written from scratch on top of the framebuffer and input dev
 - panel with Applications menu, taskbar, system tray (network, CPU, memory) and clock with a calendar
   popup; a floating dock; desktop icons; right-click context menu; toast notifications
 - appearance: five wallpapers and six accent colors, saved in `/disk/etc/pdesk.conf`
-- apps: **Terminal** (runs `sh` over pipes, ANSI colors, wheel/PgUp scrollback, `^C`/`^D`),
+- apps: **Web Browser** (below), **Terminal** (runs `sh` over pipes, ANSI colors, wheel/PgUp scrollback, `^C`/`^D`),
   **File Manager**, **Text Editor**, **System Monitor**, **Software** (a front-end for `ppm`:
   browse, install, remove, upgrade), **Settings** (appearance, startup mode, system info,
   shortcuts), **Run Program**, **Install Petrichor** (wizard, shown when a second disk is attached),
   and About
 - needs QEMU's default VGA (`-vga std`); other graphics hardware isn't supported yet
+
+**Web browser** (`user/apps/pdesk/browser.c`, `html.c`; `fetch` for loading). Opens plain `http://` pages
+and local `file://` pages (including directory listings; `.html` files open here from the File
+Manager). Pages load in a background `fetch` process, which follows redirects and decodes chunked
+responses, so the desktop never freezes. The renderer is written from scratch: headings, paragraphs,
+bold/italic/code, links, nested bulleted and numbered lists, simple tables, preformatted text,
+blockquotes, centered text, entities and common UTF-8 punctuation, with wrapping that follows the
+window size. There is an address bar (bare names like `example.com` work), back/forward/reload/stop,
+home, link hover URLs in the status bar and a draggable scrollbar. Not supported: **HTTPS** (there is no
+TLS, so https:// pages show an explanation and many sites won't load), images (shown as
+`[image: alt]`), CSS, JavaScript, forms that submit, and cookies. It was tested against a local server
+(redirects, chunked, 404) and real plain-HTTP sites such as example.com.
 
 **Package manager** (`ppm`). Packages are `.ppk` archives served over HTTP from a repository whose
 `index` lists name, version, size, SHA-256 and dependencies. `ppm update | search | info |
@@ -158,7 +170,7 @@ package that others need, and the shell finds programs in `/bin` and `/disk/bin`
 graphics library with an 8x16 font), `init`, and `sh` (pipes, `<` `>` `>>`, `;`, `&`, quoting,
 scripts, `cd`), plus
 `ls cat echo mkdir rm touch cp mv pwd ps uname uptime clear kill sleep wc grep head free df halt reboot hello selftest`,
-the network tools `ifconfig ping nslookup wget nc`, and `ppm`.
+the network tools `ifconfig ping nslookup wget nc fetch`, and `ppm`.
 
 ## Layout
 
@@ -211,7 +223,7 @@ package signatures beyond SHA-256 in the index, and the repository is plain HTTP
 signals (`kill` terminates) and no copy-on-write `fork`. The bitmap font is the standard VGA text-mode
 font as rendered by QEMU's VGA BIOS (LGPL-licensed); swap in your own if you need different terms.
 
-Natural next steps: UEFI boot (and GPT), USB (xHCI) keyboard/mouse/storage drivers, more NICs (e1000,
+Natural next steps: TLS/HTTPS and image decoding for the browser, UEFI boot (and GPT), USB (xHCI) keyboard/mouse/storage drivers, more NICs (e1000,
 RTL8168), AHCI/NVMe interrupts and multiple queues, selectable display modes, partitioning and
 dual-boot in the installer, a window-server protocol, DHCP and `listen`/`accept`, a journal, signed
 packages, real signals, a 64-bit port.

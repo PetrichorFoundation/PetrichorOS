@@ -158,6 +158,13 @@ static void open_entry(struct files *f, int i)
         snprintf(f->status, sizeof f->status, "%s is a device", e->name);
         return;
     }
+    int pl = strlen(p);
+    if ((pl > 5 && !strcmp(p + pl - 5, ".html")) || (pl > 4 && !strcmp(p + pl - 4, ".htm"))) {
+        char url[PATH_MAX + 8];
+        snprintf(url, sizeof url, "file://%s", p);
+        browser_open(url);
+        return;
+    }
     char head[512];
     int fd = open(p, O_RDONLY), n = fd < 0 ? 0 : read(fd, head, sizeof head);
     if (fd >= 0)

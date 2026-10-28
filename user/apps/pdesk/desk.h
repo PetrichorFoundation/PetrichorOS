@@ -84,11 +84,12 @@ void settings_open(void);
 void software_open(void);
 void run_open(void);
 void installer_open(void);
+void browser_open(const char *url);                          /* NULL = the home page */
 
 /* icons.c */
 enum { ICON_FOLDER, ICON_FILE, ICON_TERM, ICON_EDITOR, ICON_MONITOR, ICON_FILES, ICON_ABOUT,
        ICON_DISK, ICON_EXEC, ICON_APPS, ICON_POWER, ICON_SOFTWARE, ICON_LOGOUT, ICON_HOME,
-       ICON_SETTINGS, ICON_INSTALL, ICON_RESTART, ICON_RUN, ICON_PALETTE };
+       ICON_SETTINGS, ICON_INSTALL, ICON_RESTART, ICON_RUN, ICON_PALETTE, ICON_WEB };
 void icon_draw(int kind, int x, int y, int size);
 
 /* small widgets shared by apps */
