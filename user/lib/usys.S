@@ -66,3 +66,4 @@ SYSCALL settimeout, SYS_settimeout
 SYSCALL poll, SYS_poll
 SYSCALL fbmap, SYS_fbmap
 SYSCALL gettime, SYS_gettime
+SYSCALL drives, SYS_drives

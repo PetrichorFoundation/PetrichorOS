@@ -3,10 +3,16 @@
  * One process owns the framebuffer and the input devices.  It composes
  * windows (back to front) into an off-screen buffer, copies only the damaged
  * rectangle to the screen, and routes keyboard and mouse events to the focused
- * window's app.  The panel, dock, menu and desktop icons are drawn here. */
+ * window's app.  The panel, dock, menus, notifications, calendar and desktop
+ * icons are drawn here.
+ *
+ * Exit status tells init what to do next: 0 = log out (show the desktop
+ * again), 10 = drop to the text console. */
 #include "desk.h"
 
 #define MAXWIN 12
+
+/* ---------------- state ---------------- */
 
 static struct fbinfo fb;
 static u32 *back, *wall;
@@ -18,7 +24,7 @@ static int nz;
 static struct win *focus;
 static int opened;                       /* total windows ever opened: drives cascading */
 
-static int running = 1, want_poweroff;
+static int running = 1, exit_code, want_poweroff, want_reboot;
 static int mx = SCREEN_W / 2, my = SCREEN_H / 2, mbtn;
 
 enum { DR_NONE, DR_MOVE, DR_RESIZE, DR_APP };
@@ -28,10 +34,94 @@ static int drag_ox, drag_oy;
 static u32 last_click_tick;
 static int last_click_x, last_click_y;
 
-static int menu_open, menu_hover = -1, dock_hover = -1, icon_sel = -1;
+static int dock_hover = -1, icon_sel = -1;
 
 static struct rect damage;
 static int dirty;
+
+u32 g_accent;
+int g_wall, g_accent_idx;
+
+/* ---------------- themes ---------------- */
+
+static const struct {
+    const char *name;
+    u32 top, bottom;
+    int rain, stars;
+} walls[NWALL] = {
+    {"Rain", RGB(0x0c, 0x22, 0x3a), RGB(0x1c, 0x5a, 0x6a), 1, 0},
+    {"Forest", RGB(0x08, 0x1c, 0x14), RGB(0x2a, 0x5e, 0x3a), 1, 0},
+    {"Dusk", RGB(0x24, 0x18, 0x48), RGB(0xd0, 0x78, 0x4c), 0, 0},
+    {"Slate", RGB(0x26, 0x2c, 0x34), RGB(0x58, 0x62, 0x6e), 0, 0},
+    {"Midnight", RGB(0x02, 0x04, 0x10), RGB(0x16, 0x20, 0x44), 0, 1},
+};
+
+static const u32 accents[NACCENT] = {
+    RGB(0x4a, 0x90, 0xd9), RGB(0x3f, 0xae, 0x72), RGB(0xe0, 0x8a, 0x3c),
+    RGB(0x9a, 0x6a, 0xd8), RGB(0xd8, 0x55, 0x4a), RGB(0x2f, 0xb3, 0xb3),
+};
+
+const char *theme_wall_name(int i) { return walls[i].name; }
+u32 theme_wall_color(int i) { return gfx_mix(walls[i].top, walls[i].bottom, 150); }
+u32 theme_accent_color(int i) { return accents[i]; }
+
+#define THEME_CONF "/disk/etc/pdesk.conf"
+
+static void theme_load(void)
+{
+    g_wall = 0;
+    g_accent_idx = 0;
+    int fd = open(THEME_CONF, O_RDONLY);
+    if (fd >= 0) {
+        char buf[64];
+        int n = read(fd, buf, sizeof buf - 1);
+        close(fd);
+        buf[n > 0 ? n : 0] = 0;
+        char *p = strstr(buf, "wall=");
+        if (p) g_wall = atoi(p + 5);
+        p = strstr(buf, "accent=");
+        if (p) g_accent_idx = atoi(p + 7);
+    }
+    if (g_wall < 0 || g_wall >= NWALL) g_wall = 0;
+    if (g_accent_idx < 0 || g_accent_idx >= NACCENT) g_accent_idx = 0;
+    g_accent = accents[g_accent_idx];
+}
+
+static void render_wallpaper(void)
+{
+    gfx_set_target(wall, SCREEN_W, SCREEN_H);
+    gfx_set_clip(0, 0, SCREEN_W, SCREEN_H);
+    gfx_vgrad(0, 0, SCREEN_W, SCREEN_H, walls[g_wall].top, walls[g_wall].bottom);
+    u32 seed = 0x2545F491;
+    if (walls[g_wall].rain) {
+        for (int i = 0; i < 260; i++) {
+            seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+            int x = seed % SCREEN_W;
+            seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+            int y = seed % SCREEN_H, len = 18 + seed % 40;
+            for (int k = 0; k < len; k++) {
+                int px = x + k / 4, py = y + k;
+                if (px < SCREEN_W && py < SCREEN_H) {
+                    u32 *p = wall + py * SCREEN_W + px;
+                    *p = gfx_mix(*p, RGB(0xa8, 0xd8, 0xe8), 18 + k * 36 / len);
+                }
+            }
+        }
+    }
+    if (walls[g_wall].stars) {
+        for (int i = 0; i < 220; i++) {
+            seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+            int x = seed % SCREEN_W;
+            seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+            int y = seed % SCREEN_H, b = 90 + seed % 150;
+            gfx_fill(x, y, 1 + (i % 7 == 0), 1 + (i % 7 == 0), RGB(b, b, 255));
+        }
+    }
+    u32 mark = gfx_mix(walls[g_wall].bottom, RGB(0xc8, 0xe8, 0xf4), 70);
+    gfx_text_scaled(SCREEN_W - 400, SCREEN_H - 170, "Petrichor", mark, 5);
+    gfx_text_scaled(SCREEN_W - 398, SCREEN_H - 84, "the smell of rain on dry earth", mark, 1);
+    gfx_set_target(back, SCREEN_W, SCREEN_H);
+}
 
 /* ---------------- damage and presentation ---------------- */
 
@@ -54,6 +144,27 @@ void wm_invalidate(struct win *w)
 struct rect wm_client(struct win *w)
 {
     return (struct rect){w->x + 1, w->y + TITLE_H, w->w - 2, w->h - TITLE_H - 1};
+}
+
+void theme_set(int wall_idx, int accent_idx)
+{
+    g_wall = wall_idx;
+    g_accent_idx = accent_idx;
+    g_accent = accents[accent_idx];
+    render_wallpaper();
+    invalidate(0, 0, SCREEN_W, SCREEN_H);
+    struct diskinfo di;
+    diskinfo(&di);
+    if (di.mounted) {
+        mkdir("/disk/etc");
+        char buf[48];
+        int n = snprintf(buf, sizeof buf, "wall=%d\naccent=%d\n", g_wall, g_accent_idx);
+        int fd = open(THEME_CONF, O_WRONLY | O_CREAT | O_TRUNC);
+        if (fd >= 0) {
+            write(fd, buf, n);
+            close(fd);
+        }
+    }
 }
 
 static const char *const cursor_art[19] = {
@@ -91,30 +202,50 @@ static void cursor_hide(void)
         present(r);
 }
 
-/* ---------------- wallpaper ---------------- */
+/* ---------------- notifications ---------------- */
 
-static void render_wallpaper(void)
+#define NTOAST 4
+static struct {
+    char text[72];
+    u32 expire;
+} toasts[NTOAST];
+
+static struct rect toast_rect(int i)
 {
-    gfx_set_target(wall, SCREEN_W, SCREEN_H);
-    gfx_vgrad(0, 0, SCREEN_W, SCREEN_H, RGB(0x0c, 0x22, 0x3a), RGB(0x1c, 0x5a, 0x6a));
-    u32 seed = 0x2545F491;
-    for (int i = 0; i < 260; i++) {                      /* rain streaks */
-        seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
-        int x = seed % SCREEN_W;
-        seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
-        int y = seed % SCREEN_H, len = 18 + seed % 40;
-        for (int k = 0; k < len; k++) {
-            int px = x + k / 4, py = y + k;
-            if (px < SCREEN_W && py < SCREEN_H) {
-                u32 *p = wall + py * SCREEN_W + px;
-                *p = gfx_mix(*p, RGB(0xa8, 0xd8, 0xe8), 18 + k * 36 / len);
-            }
+    return (struct rect){SCREEN_W - 322, PANEL_H + 8 + i * 42, 312, 36};
+}
+
+void wm_notify(const char *msg)
+{
+    for (int i = NTOAST - 1; i > 0; i--)
+        toasts[i] = toasts[i - 1];
+    safestrcpy(toasts[0].text, msg, sizeof toasts[0].text);
+    toasts[0].expire = uptime() + 450;
+    invalidate(SCREEN_W - 330, PANEL_H, 330, NTOAST * 42 + 12);
+}
+
+static void draw_toasts(void)
+{
+    for (int i = 0; i < NTOAST; i++) {
+        if (!toasts[i].expire)
+            continue;
+        struct rect r = toast_rect(i);
+        gfx_blend(r.x + 3, r.y + 3, r.w, r.h, 0, 70);
+        gfx_fill(r.x, r.y, r.w, r.h, RGB(0x20, 0x28, 0x32));
+        gfx_frame(r.x, r.y, r.w, r.h, RGB(0x50, 0x62, 0x74));
+        gfx_fill(r.x, r.y, 4, r.h, g_accent);
+        gfx_text(r.x + 14, r.y + 10, toasts[i].text, C_WHITE);
+    }
+}
+
+static void expire_toasts(u32 now)
+{
+    for (int i = 0; i < NTOAST; i++) {
+        if (toasts[i].expire && (int)(now - toasts[i].expire) >= 0) {
+            toasts[i].expire = 0;
+            invalidate(SCREEN_W - 330, PANEL_H, 330, NTOAST * 42 + 12);
         }
     }
-    gfx_text_scaled(SCREEN_W - 400, SCREEN_H - 170, "Petrichor", RGB(0x3c, 0x7c, 0x8c), 5);
-    gfx_text_scaled(SCREEN_W - 398, SCREEN_H - 84, "the smell of rain on dry earth",
-                    RGB(0x3c, 0x7c, 0x8c), 1);
-    gfx_set_target(back, SCREEN_W, SCREEN_H);
 }
 
 /* ---------------- windows ---------------- */
@@ -186,6 +317,16 @@ void wm_set_title(struct win *w, const char *title)
     invalidate(0, 0, SCREEN_W, PANEL_H);
 }
 
+static void focus_top(void)
+{
+    focus = NULL;
+    for (int i = nz - 1; i >= 0; i--)
+        if (!zorder[i]->minimized) {
+            set_focus(zorder[i]);
+            break;
+        }
+}
+
 void wm_close(struct win *w)
 {
     if (!w->used)
@@ -197,44 +338,42 @@ void wm_close(struct win *w)
     z_remove(w);
     if (drag_win == w)
         drag_mode = DR_NONE;
-    if (focus == w) {
-        focus = NULL;
-        for (int i = nz - 1; i >= 0; i--)
-            if (!zorder[i]->minimized) {
-                set_focus(zorder[i]);
-                break;
-            }
-    }
+    if (focus == w)
+        focus_top();
     invalidate(0, 0, SCREEN_W, PANEL_H);
+}
+
+#define WORK_H (SCREEN_H - PANEL_H - DOCK_H + 10)
+
+static void set_geometry(struct win *w, int x, int y, int ww, int hh)
+{
+    wm_invalidate(w);
+    if (!w->maximized) {
+        w->sx = w->x; w->sy = w->y; w->sw = w->w; w->sh = w->h;
+    }
+    w->x = x; w->y = y; w->w = ww; w->h = hh;
+    w->maximized = 1;
+    wm_invalidate(w);
 }
 
 static void toggle_maximize(struct win *w)
 {
-    wm_invalidate(w);
     if (w->maximized) {
+        wm_invalidate(w);
         w->x = w->sx; w->y = w->sy; w->w = w->sw; w->h = w->sh;
         w->maximized = 0;
+        wm_invalidate(w);
     } else {
-        w->sx = w->x; w->sy = w->y; w->sw = w->w; w->sh = w->h;
-        w->x = 0; w->y = PANEL_H;
-        w->w = SCREEN_W; w->h = SCREEN_H - PANEL_H - DOCK_H + 10;
-        w->maximized = 1;
+        set_geometry(w, 0, PANEL_H, SCREEN_W, WORK_H);
     }
-    wm_invalidate(w);
 }
 
 static void minimize(struct win *w)
 {
     w->minimized = 1;
     wm_invalidate(w);
-    if (focus == w) {
-        focus = NULL;
-        for (int i = nz - 1; i >= 0; i--)
-            if (!zorder[i]->minimized) {
-                set_focus(zorder[i]);
-                break;
-            }
-    }
+    if (focus == w)
+        focus_top();
     invalidate(0, 0, SCREEN_W, PANEL_H);
 }
 
@@ -249,9 +388,9 @@ static void activate(struct win *w)
 
 static void title_button(int x, int y, int kind, int active)
 {
-    gfx_vgrad(x, y, 18, 16, active ? RGB(0x7e, 0x9a, 0xb8) : RGB(0xb4, 0xbc, 0xc4),
-              active ? RGB(0x5a, 0x76, 0x94) : RGB(0x9a, 0xa4, 0xae));
-    gfx_frame(x, y, 18, 16, active ? RGB(0x2c, 0x40, 0x58) : RGB(0x70, 0x7a, 0x84));
+    gfx_vgrad(x, y, 18, 16, active ? gfx_mix(RGB(0x70, 0x84, 0x98), g_accent, 90) : RGB(0xb4, 0xbc, 0xc4),
+              active ? gfx_mix(RGB(0x40, 0x56, 0x6c), g_accent, 90) : RGB(0x9a, 0xa4, 0xae));
+    gfx_frame(x, y, 18, 16, active ? RGB(0x24, 0x34, 0x46) : RGB(0x70, 0x7a, 0x84));
     u32 c = C_WHITE;
     if (kind == 0)
         gfx_fill(x + 5, y + 10, 8, 2, c);                         /* minimize */
@@ -270,8 +409,8 @@ static void draw_window(struct win *w, struct rect damage_clip)
     gfx_blend(w->x + 4, w->y + 5, w->w, w->h, 0, 24);            /* soft shadow */
     gfx_blend(w->x + 2, w->y + 3, w->w, w->h, 0, 24);
     gfx_fill(w->x, w->y, w->w, w->h, C_WIN_EDGE);
-    gfx_vgrad(w->x + 1, w->y + 1, w->w - 2, TITLE_H - 1, act ? C_TITLE_A : C_TITLE_IA,
-              act ? C_TITLE_B : C_TITLE_IB);
+    u32 ta = gfx_mix(RGB(0x58, 0x6a, 0x7c), g_accent, 96), tb = gfx_mix(RGB(0x34, 0x44, 0x56), g_accent, 96);
+    gfx_vgrad(w->x + 1, w->y + 1, w->w - 2, TITLE_H - 1, act ? ta : C_TITLE_IA, act ? tb : C_TITLE_IB);
 
     char t[64];
     int maxc = (w->w - 110) / 8;
@@ -301,59 +440,305 @@ static void draw_window(struct win *w, struct rect damage_clip)
     }
 }
 
-/* ---------------- drawing: desktop furniture ---------------- */
+/* ---------------- actions and menus ---------------- */
 
-struct place {
+enum { A_TERM, A_FILES, A_EDIT, A_MON, A_SOFT, A_SETTINGS, A_RUN, A_INSTALL, A_ABOUT, A_CONSOLE,
+       A_LOGOUT, A_RESTART, A_POWER, A_WALLPAPER, A_SEP };
+
+struct menu_item {
     const char *label;
-    const char *path;
+    int icon, action;
+};
+
+struct popup {
+    struct menu_item items[20];
+    int n, x, y, hover;
+};
+
+static struct popup app_menu, ctx_menu;
+static struct popup *open_popup;
+static int installable;
+
+static void add_item(struct popup *p, const char *label, int icon, int action)
+{
+    p->items[p->n++] = (struct menu_item){label, icon, action};
+}
+
+static void build_menus(void)
+{
+    app_menu.n = 0;
+    add_item(&app_menu, "Terminal", ICON_TERM, A_TERM);
+    add_item(&app_menu, "File Manager", ICON_FILES, A_FILES);
+    add_item(&app_menu, "Text Editor", ICON_EDITOR, A_EDIT);
+    add_item(&app_menu, "System Monitor", ICON_MONITOR, A_MON);
+    add_item(&app_menu, "Software", ICON_SOFTWARE, A_SOFT);
+    add_item(&app_menu, "Run Program...", ICON_RUN, A_RUN);
+    add_item(&app_menu, "", 0, A_SEP);
+    add_item(&app_menu, "Settings", ICON_SETTINGS, A_SETTINGS);
+    if (installable)
+        add_item(&app_menu, "Install Petrichor", ICON_INSTALL, A_INSTALL);
+    add_item(&app_menu, "About Petrichor", ICON_ABOUT, A_ABOUT);
+    add_item(&app_menu, "", 0, A_SEP);
+    add_item(&app_menu, "Exit to Console", ICON_TERM, A_CONSOLE);
+    add_item(&app_menu, "Log Out", ICON_LOGOUT, A_LOGOUT);
+    add_item(&app_menu, "Restart", ICON_RESTART, A_RESTART);
+    add_item(&app_menu, "Shut Down", ICON_POWER, A_POWER);
+
+    ctx_menu.n = 0;
+    add_item(&ctx_menu, "Open Terminal", ICON_TERM, A_TERM);
+    add_item(&ctx_menu, "File Manager", ICON_FILES, A_FILES);
+    add_item(&ctx_menu, "Text Editor", ICON_EDITOR, A_EDIT);
+    add_item(&ctx_menu, "", 0, A_SEP);
+    add_item(&ctx_menu, "Change Wallpaper", ICON_PALETTE, A_WALLPAPER);
+    add_item(&ctx_menu, "Settings", ICON_SETTINGS, A_SETTINGS);
+    add_item(&ctx_menu, "", 0, A_SEP);
+    add_item(&ctx_menu, "About Petrichor", ICON_ABOUT, A_ABOUT);
+}
+
+int wm_installer_available(void) { return installable; }
+
+static int item_h(const struct menu_item *it) { return it->action == A_SEP ? 9 : 30; }
+
+static struct rect popup_rect(struct popup *p)
+{
+    int h = 8;
+    for (int i = 0; i < p->n; i++)
+        h += item_h(&p->items[i]);
+    return (struct rect){p->x, p->y, 230, h};
+}
+
+static int popup_index_at(struct popup *p, int x, int y)
+{
+    struct rect m = popup_rect(p);
+    if (!rect_hit(m, x, y))
+        return -1;
+    int top = m.y + 4;
+    for (int i = 0; i < p->n; i++) {
+        int h = item_h(&p->items[i]);
+        if (y >= top && y < top + h)
+            return p->items[i].action == A_SEP ? -1 : i;
+        top += h;
+    }
+    return -1;
+}
+
+static void popup_draw(struct popup *p)
+{
+    struct rect m = popup_rect(p);
+    gfx_blend(m.x + 3, m.y + 3, m.w, m.h, 0, 60);
+    gfx_fill(m.x, m.y, m.w, m.h, RGB(0xf4, 0xf5, 0xf6));
+    gfx_frame(m.x, m.y, m.w, m.h, RGB(0x50, 0x5a, 0x64));
+    int y = m.y + 4;
+    for (int i = 0; i < p->n; i++) {
+        int h = item_h(&p->items[i]);
+        if (p->items[i].action == A_SEP) {
+            gfx_hline(m.x + 8, y + 4, m.w - 16, RGB(0xc0, 0xc6, 0xcc));
+        } else {
+            if (p->hover == i)
+                gfx_fill(m.x + 2, y, m.w - 4, h, g_accent);
+            icon_draw(p->items[i].icon, m.x + 10, y + 5, 20);
+            gfx_text(m.x + 40, y + 7, p->items[i].label, p->hover == i ? C_WHITE : C_TEXT);
+        }
+        y += h;
+    }
+}
+
+static void popup_close(void)
+{
+    if (!open_popup)
+        return;
+    struct rect m = popup_rect(open_popup);
+    invalidate(m.x, m.y, m.w + 6, m.h + 6);
+    invalidate(0, 0, 130, PANEL_H);
+    open_popup = NULL;
+}
+
+static void popup_show(struct popup *p, int x, int y)
+{
+    popup_close();
+    p->hover = -1;
+    p->x = x;
+    p->y = y;
+    struct rect m = popup_rect(p);
+    if (p->x + m.w > SCREEN_W) p->x = SCREEN_W - m.w - 2;
+    if (p->y + m.h > SCREEN_H) p->y = SCREEN_H - m.h - 2;
+    open_popup = p;
+    m = popup_rect(p);
+    invalidate(m.x, m.y, m.w + 6, m.h + 6);
+    invalidate(0, 0, 130, PANEL_H);
+}
+
+static void launch(int action)
+{
+    switch (action) {
+    case A_TERM:     term_open(NULL); break;
+    case A_FILES:    files_open("/"); break;
+    case A_EDIT:     editor_open(NULL); break;
+    case A_MON:      sysmon_open(); break;
+    case A_SOFT:     software_open(); break;
+    case A_SETTINGS: settings_open(); break;
+    case A_RUN:      run_open(); break;
+    case A_INSTALL:  installer_open(); break;
+    case A_ABOUT:    about_open(); break;
+    case A_CONSOLE:  running = 0; exit_code = 10; break;
+    case A_LOGOUT:   running = 0; break;
+    case A_RESTART:  running = 0; want_reboot = 1; break;
+    case A_POWER:    running = 0; want_poweroff = 1; break;
+    case A_WALLPAPER: theme_set((g_wall + 1) % NWALL, g_accent_idx); break;
+    }
+}
+
+/* ---------------- desktop icons ---------------- */
+
+struct dicon {
+    const char *label, *path;                          /* path == NULL: the installer */
     int icon;
 };
 
-static const struct place places[] = {
+static struct dicon dicons[4] = {
     {"Computer", "/", ICON_DISK},
     {"Home", "/disk", ICON_HOME},
     {"Programs", "/bin", ICON_FOLDER},
 };
-#define NPLACES 3
+static int ndicons = 3;
+
+static struct rect dicon_rect(int i)
+{
+    return (struct rect){14, PANEL_H + 18 + i * 92, 84, 84};
+}
 
 static void draw_desktop_icons(void)
 {
-    for (int i = 0; i < NPLACES; i++) {
+    for (int i = 0; i < ndicons; i++) {
         int x = 28, y = PANEL_H + 24 + i * 92;
         if (icon_sel == i)
-            gfx_blend(x - 14, y - 6, 84, 84, C_ACCENT, 90);
-        icon_draw(places[i].icon, x, y, 48);
-        int tw = gfx_text_width(places[i].label);
-        gfx_text(x + 25 - tw / 2, y + 56, places[i].label, 0x000000);
-        gfx_text(x + 24 - tw / 2, y + 55, places[i].label, C_WHITE);
+            gfx_blend(x - 14, y - 6, 84, 84, g_accent, 90);
+        icon_draw(dicons[i].icon, x, y, 48);
+        const char *label = dicons[i].path ? dicons[i].label : "Install";
+        int tw = gfx_text_width(label);
+        gfx_text(x + 25 - tw / 2, y + 56, label, 0x000000);
+        gfx_text(x + 24 - tw / 2, y + 55, label, C_WHITE);
     }
 }
 
+/* ---------------- panel: taskbar, tray, clock, calendar ---------------- */
+
 static const char *const month_name[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+static const char *const month_full[] = {"January", "February", "March", "April", "May", "June", "July",
+                                         "August", "September", "October", "November", "December"};
 static const char *const day_name[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+
+static int weekday(int y, int m, int d)
+{
+    static const int off[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+    if (m < 3)
+        y--;
+    return (y + y / 4 - y / 100 + y / 400 + off[m - 1] + d) % 7;
+}
+
+static int days_in(int y, int m)
+{
+    static const int d[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    return m == 2 && ((y % 4 == 0 && y % 100) || y % 400 == 0) ? 29 : d[m - 1];
+}
 
 static void clock_text(char *buf, int n)
 {
     struct rtc_time t;
     gettime(&t);
-    int y = t.year, m = t.month < 1 || t.month > 12 ? 1 : t.month;
-    static const int off[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
-    if (m < 3)
-        y--;
-    int dow = (y + y / 4 - y / 100 + y / 400 + off[m - 1] + t.day) % 7;
-    snprintf(buf, n, "%s %d %s  %02d:%02d", day_name[dow], t.day, month_name[m - 1], t.hour, t.min);
+    int m = t.month < 1 || t.month > 12 ? 1 : t.month;
+    snprintf(buf, n, "%s %d %s  %02d:%02d", day_name[weekday(t.year, m, t.day)], t.day, month_name[m - 1],
+             t.hour, t.min);
+}
+
+static int cal_open, cal_year, cal_month;
+static struct rect cal_rect(void) { return (struct rect){SCREEN_W - 252, PANEL_H + 2, 248, 214}; }
+
+static void cal_show(void)
+{
+    struct rtc_time t;
+    gettime(&t);
+    cal_year = t.year;
+    cal_month = t.month < 1 || t.month > 12 ? 1 : t.month;
+    cal_open = 1;
+    struct rect r = cal_rect();
+    invalidate(r.x, r.y, r.w + 6, r.h + 6);
+}
+
+static void cal_close(void)
+{
+    cal_open = 0;
+    struct rect r = cal_rect();
+    invalidate(r.x, r.y, r.w + 6, r.h + 6);
+}
+
+static void draw_calendar(void)
+{
+    struct rect r = cal_rect();
+    gfx_blend(r.x + 3, r.y + 3, r.w, r.h, 0, 60);
+    gfx_fill(r.x, r.y, r.w, r.h, RGB(0xf4, 0xf5, 0xf6));
+    gfx_frame(r.x, r.y, r.w, r.h, RGB(0x50, 0x5a, 0x64));
+    gfx_fill(r.x + 1, r.y + 1, r.w - 2, 30, g_accent);
+    char head[40];
+    snprintf(head, sizeof head, "%s %d", month_full[cal_month - 1], cal_year);
+    gfx_text(r.x + (r.w - gfx_text_width(head)) / 2, r.y + 8, head, C_WHITE);
+    gfx_text(r.x + 10, r.y + 8, "<", C_WHITE);
+    gfx_text(r.x + r.w - 18, r.y + 8, ">", C_WHITE);
+    for (int i = 0; i < 7; i++)
+        gfx_text(r.x + 10 + i * 32, r.y + 38, day_name[i], C_TEXT_DIM);
+    struct rtc_time t;
+    gettime(&t);
+    int first = weekday(cal_year, cal_month, 1), nd = days_in(cal_year, cal_month);
+    for (int d = 1; d <= nd; d++) {
+        int slot = first + d - 1, col = slot % 7, row = slot / 7;
+        int x = r.x + 8 + col * 32, y = r.y + 58 + row * 24;
+        int today = d == t.day && cal_month == t.month && cal_year == t.year;
+        if (today)
+            gfx_fill(x - 2, y - 3, 28, 22, g_accent);
+        char num[4];
+        snprintf(num, sizeof num, "%d", d);
+        gfx_text(x + 12 - gfx_text_width(num) / 2, y, num, today ? C_WHITE : C_TEXT);
+    }
 }
 
 #define APPBTN_W 128
+#define TRAY_W   150
 
 static struct rect taskbar_rect(int idx, int count)
 {
-    int x0 = APPBTN_W + 8, x1 = SCREEN_W - 200;
+    int x0 = APPBTN_W + 8, x1 = SCREEN_W - 200 - TRAY_W;
     int w = (x1 - x0) / (count ? count : 1);
     if (w > 170)
         w = 170;
     return (struct rect){x0 + idx * (w + 2), 2, w, PANEL_H - 4};
+}
+
+static int cpu_pct, mem_mb, net_up;
+
+static void sample_tray(void)
+{
+    static u32 prev_ticks, prev_now;
+    struct procinfo pi[64];
+    int n = ps(pi, 64);
+    u32 total = 0, now = uptime();
+    for (int i = 0; i < n; i++)
+        if (pi[i].pid != 0)
+            total += pi[i].ticks;
+    u32 dt = now - prev_now;
+    if (prev_now && dt) {
+        u32 pct = (total - prev_ticks) * 100 / dt;
+        cpu_pct = pct > 100 ? 100 : pct;
+    }
+    prev_ticks = total;
+    prev_now = now;
+    struct meminfo mi;
+    meminfo(&mi);
+    mem_mb = (mi.total_kb - mi.free_kb) / 1024;
+    struct netinfo ni;
+    netinfo(&ni);
+    net_up = ni.up;
+    invalidate(SCREEN_W - 200 - TRAY_W, 0, TRAY_W, PANEL_H);
 }
 
 static void draw_panel(void)
@@ -361,7 +746,7 @@ static void draw_panel(void)
     gfx_vgrad(0, 0, SCREEN_W, PANEL_H, RGB(0x30, 0x39, 0x43), C_PANEL);
     gfx_hline(0, PANEL_H - 1, SCREEN_W, RGB(0x10, 0x14, 0x18));
 
-    gfx_fill(0, 0, APPBTN_W, PANEL_H - 1, menu_open ? C_ACCENT : C_PANEL_HI);
+    gfx_fill(0, 0, APPBTN_W, PANEL_H - 1, open_popup == &app_menu ? g_accent : C_PANEL_HI);
     icon_draw(ICON_APPS, 6, 5, 18);
     gfx_text(30, 6, "Applications", C_WHITE);
 
@@ -376,7 +761,7 @@ static void draw_panel(void)
         int act = &wins[i] == focus && !wins[i].minimized;
         gfx_fill(r.x, r.y, r.w, r.h, act ? RGB(0x56, 0x6c, 0x84) : C_PANEL_HI);
         if (act)
-            gfx_fill(r.x, r.y + r.h - 2, r.w, 2, C_ACCENT);
+            gfx_fill(r.x, r.y + r.h - 2, r.w, 2, g_accent);
         char t[32];
         int maxc = (r.w - 12) / 8;
         safestrcpy(t, wins[i].title, sizeof t);
@@ -385,25 +770,36 @@ static void draw_panel(void)
         gfx_text(r.x + 6, r.y + 4, t, wins[i].minimized ? RGB(0x90, 0x9a, 0xa4) : C_WHITE);
     }
 
+    int tx = SCREEN_W - 200 - TRAY_W + 6;                        /* tray: network, CPU, memory */
+    gfx_fill(tx, 10, 8, 8, net_up ? RGB(0x4e, 0xc9, 0x4e) : RGB(0x80, 0x88, 0x90));
+    char t[40];
+    snprintf(t, sizeof t, "CPU %d%%", cpu_pct);
+    gfx_text(tx + 14, 6, t, RGB(0xc8, 0xd0, 0xd8));
+    snprintf(t, sizeof t, "%dM", mem_mb);
+    gfx_text(tx + 90, 6, t, RGB(0xc8, 0xd0, 0xd8));
+
     char clk[40];
     clock_text(clk, sizeof clk);
     gfx_text(SCREEN_W - gfx_text_width(clk) - 10, 6, clk, C_WHITE);
     gfx_text(SCREEN_W - 200 + 8, 6, "root", RGB(0xa8, 0xb4, 0xc0));
 }
 
+/* ---------------- dock ---------------- */
+
 struct dock_item {
     const char *label;
-    int icon;
+    int icon, action;
 };
 
 static const struct dock_item dock_items[] = {
-    {"Terminal", ICON_TERM},
-    {"File Manager", ICON_FILES},
-    {"Text Editor", ICON_EDITOR},
-    {"System Monitor", ICON_MONITOR},
-    {"Software", ICON_SOFTWARE},
+    {"Terminal", ICON_TERM, A_TERM},
+    {"File Manager", ICON_FILES, A_FILES},
+    {"Text Editor", ICON_EDITOR, A_EDIT},
+    {"System Monitor", ICON_MONITOR, A_MON},
+    {"Software", ICON_SOFTWARE, A_SOFT},
+    {"Settings", ICON_SETTINGS, A_SETTINGS},
 };
-#define NDOCK 5
+#define NDOCK 6
 
 static struct rect dock_rect(void)
 {
@@ -438,73 +834,6 @@ static void draw_dock(void)
     }
 }
 
-enum { A_TERM, A_FILES, A_EDIT, A_MON, A_SOFT, A_ABOUT, A_LOGOUT, A_POWER, A_SEP };
-
-struct menu_item {
-    const char *label;
-    int icon, action;
-};
-
-static const struct menu_item menu_items[] = {
-    {"Terminal", ICON_TERM, A_TERM},
-    {"File Manager", ICON_FILES, A_FILES},
-    {"Text Editor", ICON_EDITOR, A_EDIT},
-    {"System Monitor", ICON_MONITOR, A_MON},
-    {"Software (ppm)", ICON_SOFTWARE, A_SOFT},
-    {"", 0, A_SEP},
-    {"About Petrichor", ICON_ABOUT, A_ABOUT},
-    {"", 0, A_SEP},
-    {"Log Out", ICON_LOGOUT, A_LOGOUT},
-    {"Shut Down", ICON_POWER, A_POWER},
-};
-#define NMENU 10
-
-static int menu_item_h(int i) { return menu_items[i].action == A_SEP ? 9 : 30; }
-
-static struct rect menu_rect(void)
-{
-    int h = 8;
-    for (int i = 0; i < NMENU; i++)
-        h += menu_item_h(i);
-    return (struct rect){2, PANEL_H, 230, h};
-}
-
-static int menu_index_at(int x, int y)
-{
-    struct rect m = menu_rect();
-    if (!rect_hit(m, x, y))
-        return -1;
-    int top = m.y + 4;
-    for (int i = 0; i < NMENU; i++) {
-        int h = menu_item_h(i);
-        if (y >= top && y < top + h)
-            return menu_items[i].action == A_SEP ? -1 : i;
-        top += h;
-    }
-    return -1;
-}
-
-static void draw_menu(void)
-{
-    struct rect m = menu_rect();
-    gfx_blend(m.x + 3, m.y + 3, m.w, m.h, 0, 60);
-    gfx_fill(m.x, m.y, m.w, m.h, RGB(0xf4, 0xf5, 0xf6));
-    gfx_frame(m.x, m.y, m.w, m.h, RGB(0x50, 0x5a, 0x64));
-    int y = m.y + 4;
-    for (int i = 0; i < NMENU; i++) {
-        int h = menu_item_h(i);
-        if (menu_items[i].action == A_SEP) {
-            gfx_hline(m.x + 8, y + 4, m.w - 16, RGB(0xc0, 0xc6, 0xcc));
-        } else {
-            if (menu_hover == i)
-                gfx_fill(m.x + 2, y, m.w - 4, h, C_ACCENT);
-            icon_draw(menu_items[i].icon, m.x + 10, y + 5, 20);
-            gfx_text(m.x + 40, y + 7, menu_items[i].label, menu_hover == i ? C_WHITE : C_TEXT);
-        }
-        y += h;
-    }
-}
-
 /* ---------------- repaint ---------------- */
 
 static void repaint(void)
@@ -523,37 +852,13 @@ static void repaint(void)
             draw_window(zorder[i], d);
     draw_panel();
     draw_dock();
-    if (menu_open)
-        draw_menu();
+    draw_toasts();
+    if (cal_open)
+        draw_calendar();
+    if (open_popup)
+        popup_draw(open_popup);
     present(d);
     cursor_show();
-}
-
-/* ---------------- launching ---------------- */
-
-static void launch(int action)
-{
-    switch (action) {
-    case A_TERM:   term_open(NULL); break;
-    case A_FILES:  files_open("/"); break;
-    case A_EDIT:   editor_open(NULL); break;
-    case A_MON:    sysmon_open(); break;
-    case A_SOFT:   term_open("ppm list"); break;
-    case A_ABOUT:  about_open(); break;
-    case A_LOGOUT: running = 0; break;
-    case A_POWER:  running = 0; want_poweroff = 1; break;
-    }
-}
-
-static void close_menu(void)
-{
-    if (!menu_open)
-        return;
-    menu_open = 0;
-    menu_hover = -1;
-    struct rect m = menu_rect();
-    invalidate(m.x, m.y, m.w + 6, m.h + 6);
-    invalidate(0, 0, APPBTN_W, PANEL_H);
 }
 
 /* ---------------- mouse ---------------- */
@@ -604,7 +909,7 @@ static void on_move(void)
 
     int dh = -1;                                                  /* hover feedback */
     struct rect d = dock_rect();
-    if (rect_hit(d, mx, my) && !window_at(mx, my))
+    if (rect_hit(d, mx, my))
         for (int i = 0; i < NDOCK; i++)
             if (rect_hit(dock_icon_rect(i), mx, my))
                 dh = i;
@@ -612,11 +917,11 @@ static void on_move(void)
         dock_hover = dh;
         invalidate(d.x, d.y - 30, d.w, d.h + 30);
     }
-    if (menu_open) {
-        int mh = menu_index_at(mx, my);
-        if (mh != menu_hover) {
-            menu_hover = mh;
-            struct rect m = menu_rect();
+    if (open_popup) {
+        int mh = popup_index_at(open_popup, mx, my);
+        if (mh != open_popup->hover) {
+            open_popup->hover = mh;
+            struct rect m = popup_rect(open_popup);
             invalidate(m.x, m.y, m.w, m.h);
         }
     }
@@ -624,22 +929,38 @@ static void on_move(void)
 
 static void on_down(int dbl)
 {
-    if (menu_open) {
-        int i = menu_index_at(mx, my);
-        int was_button = my < PANEL_H && mx < APPBTN_W;
-        close_menu();
+    if (cal_open) {                                               /* calendar popup */
+        struct rect r = cal_rect();
+        if (rect_hit(r, mx, my)) {
+            if (my < r.y + 30 && mx < r.x + 34) { if (--cal_month < 1) { cal_month = 12; cal_year--; } }
+            else if (my < r.y + 30 && mx > r.x + r.w - 34) { if (++cal_month > 12) { cal_month = 1; cal_year++; } }
+            invalidate(r.x, r.y, r.w + 6, r.h + 6);
+            return;
+        }
+        int on_clock = my < PANEL_H && mx >= SCREEN_W - 200;
+        cal_close();
+        if (on_clock)
+            return;
+    }
+    if (open_popup) {
+        struct popup *p = open_popup;
+        int i = popup_index_at(p, mx, my);
+        int inside = rect_hit(popup_rect(p), mx, my);
+        int was_button = p == &app_menu && my < PANEL_H && mx < APPBTN_W;
+        popup_close();
         if (i >= 0)
-            launch(menu_items[i].action);
-        if (i >= 0 || was_button)
+            launch(p->items[i].action);
+        if (inside || was_button)
             return;
     }
 
     if (my < PANEL_H) {                                           /* panel */
         if (mx < APPBTN_W) {
-            menu_open = 1;
-            struct rect m = menu_rect();
-            invalidate(m.x, m.y, m.w + 6, m.h + 6);
-            invalidate(0, 0, APPBTN_W, PANEL_H);
+            popup_show(&app_menu, 2, PANEL_H);
+            return;
+        }
+        if (mx >= SCREEN_W - 200) {
+            cal_show();
             return;
         }
         int count = 0;
@@ -664,7 +985,7 @@ static void on_down(int dbl)
     if (rect_hit(dock_rect(), mx, my)) {                           /* the dock floats above windows */
         for (int i = 0; i < NDOCK; i++)
             if (rect_hit(dock_icon_rect(i), mx, my))
-                launch(i);                                         /* dock order matches A_TERM.. A_SOFT */
+                launch(dock_items[i].action);
         return;
     }
     struct win *w = window_at(mx, my);
@@ -677,12 +998,18 @@ static void on_down(int dbl)
             if (mx >= rx - 46 && mx < rx - 28) { toggle_maximize(w); return; }
             if (mx >= rx - 68 && mx < rx - 50) { minimize(w); return; }
             if (dbl) { toggle_maximize(w); return; }
-            if (!w->maximized) {
-                drag_mode = DR_MOVE;
-                drag_win = w;
-                drag_ox = mx - w->x;
-                drag_oy = my - w->y;
+            drag_mode = DR_MOVE;
+            drag_win = w;
+            if (w->maximized) {                                    /* grabbing a maximized/snapped title restores it */
+                int rel = (mx - w->x) * 256 / w->w;
+                wm_invalidate(w);
+                w->x = w->sx; w->y = w->sy; w->w = w->sw; w->h = w->sh;
+                w->maximized = 0;
+                w->x = mx - rel * w->w / 256;
+                wm_invalidate(w);
             }
+            drag_ox = mx - w->x;
+            drag_oy = my - w->y;
             return;
         }
         if (!w->maximized && mx > w->x + w->w - 16 && my > w->y + w->h - 16) {
@@ -702,23 +1029,48 @@ static void on_down(int dbl)
         return;
     }
 
-    for (int i = 0; i < NPLACES; i++) {                            /* desktop icons */
-        struct rect r = {14, PANEL_H + 18 + i * 92, 84, 84};
-        if (rect_hit(r, mx, my)) {
-            if (dbl)
-                files_open(places[i].path);
+    for (int i = 0; i < ndicons; i++) {                            /* desktop icons */
+        if (rect_hit(dicon_rect(i), mx, my)) {
+            if (dbl) {
+                if (dicons[i].path)
+                    files_open(dicons[i].path);
+                else
+                    installer_open();
+            }
             if (icon_sel != i) {
                 icon_sel = i;
-                invalidate(0, PANEL_H, 110, 300);
+                invalidate(0, PANEL_H, 110, 400);
             }
             return;
         }
     }
     if (icon_sel >= 0) {
         icon_sel = -1;
-        invalidate(0, PANEL_H, 110, 300);
+        invalidate(0, PANEL_H, 110, 400);
     }
     set_focus(NULL);
+}
+
+static void on_rdown(void)
+{
+    if (open_popup || cal_open) {
+        popup_close();
+        if (cal_open)
+            cal_close();
+        return;
+    }
+    if (my < PANEL_H || rect_hit(dock_rect(), mx, my))
+        return;
+    struct win *w = window_at(mx, my);
+    if (w) {
+        if (w != focus)
+            activate(w);
+        struct rect c = wm_client(w);
+        if (rect_hit(c, mx, my) && w->app->mouse)
+            w->app->mouse(w, mx - c.x, my - c.y, M_RDOWN);
+        return;
+    }
+    popup_show(&ctx_menu, mx, my);
 }
 
 static void on_up(void)
@@ -728,6 +1080,14 @@ static void on_up(void)
         struct rect c = wm_client(w);
         if (w->app->mouse)
             w->app->mouse(w, mx - c.x, my - c.y, M_UP);
+    } else if (drag_mode == DR_MOVE && drag_win && drag_win->used) {
+        struct win *w = drag_win;                                  /* snap to screen edges */
+        if (my <= PANEL_H + 2)
+            set_geometry(w, 0, PANEL_H, SCREEN_W, WORK_H);
+        else if (mx <= 2)
+            set_geometry(w, 0, PANEL_H, SCREEN_W / 2, WORK_H);
+        else if (mx >= SCREEN_W - 3)
+            set_geometry(w, SCREEN_W / 2, PANEL_H, SCREEN_W / 2, WORK_H);
     }
     drag_mode = DR_NONE;
 }
@@ -755,6 +1115,15 @@ static void handle_mouse(struct input_event *e)
     } else if (!(nb & BTN_LEFT) && (old & BTN_LEFT)) {
         on_up();
     }
+    if ((nb & BTN_RIGHT) && !(old & BTN_RIGHT))
+        on_rdown();
+}
+
+static void handle_wheel(int dir)
+{
+    struct win *w = window_at(mx, my);
+    if (w && w->app->wheel && rect_hit(wm_client(w), mx, my))
+        w->app->wheel(w, dir);
 }
 
 /* ---------------- keyboard ---------------- */
@@ -773,14 +1142,20 @@ static void handle_key(struct input_event *e)
 {
     if (!(e->flags & IEF_DOWN))
         return;
-    if (e->code == 27 && menu_open) {
-        close_menu();
+    if (e->code == 27 && (open_popup || cal_open)) {
+        popup_close();
+        if (cal_open)
+            cal_close();
         return;
     }
     if ((e->flags & IEF_ALT) && e->code == '\t') { cycle_focus(); return; }
     if ((e->flags & IEF_ALT) && e->code == KEY_F1 + 3) {           /* Alt+F4 */
         if (focus)
             wm_close(focus);
+        return;
+    }
+    if ((e->flags & IEF_ALT) && e->code == KEY_F1 + 1) {           /* Alt+F2: run a program */
+        run_open();
         return;
     }
     if ((e->flags & IEF_ALT) && (e->flags & IEF_CTRL) && (e->code == 't' || e->code == 'T')) {
@@ -795,7 +1170,7 @@ static void handle_key(struct input_event *e)
 
 static void about_draw(struct win *w, struct rect c)
 {
-    gfx_vgrad(c.x, c.y, c.w, 92, RGB(0x0c, 0x22, 0x3a), RGB(0x1c, 0x5a, 0x6a));
+    gfx_vgrad(c.x, c.y, c.w, 92, walls[g_wall].top, walls[g_wall].bottom);
     gfx_text_scaled(c.x + 20, c.y + 18, "Petrichor", C_WHITE, 3);
     gfx_text(c.x + 22, c.y + 66, "a from-scratch Unix for i386", RGB(0xa8, 0xd8, 0xe8));
 
@@ -855,7 +1230,17 @@ int main(void)
         return 1;
     }
     gfx_set_target(back, SCREEN_W, SCREEN_H);
+    theme_load();
+    struct driveinfo di[4];
+    int nd = drives(di, 4);
+    for (int i = 0; i < nd; i++)
+        if (!di[i].boot && di[i].sectors >= 6144)
+            installable = 1;
+    if (installable)
+        dicons[ndicons++] = (struct dicon){"Install Petrichor", NULL, ICON_INSTALL};
+    build_menus();
     render_wallpaper();
+    sample_tray();
     invalidate(0, 0, SCREEN_W, SCREEN_H);
     repaint();
 
@@ -882,6 +1267,8 @@ int main(void)
                 for (int i = 0; i < got; i++) {
                     if (ev[i].type == INPUT_MOUSE)
                         handle_mouse(&ev[i]);
+                    else if (ev[i].type == INPUT_WHEEL)
+                        handle_wheel(ev[i].dy);
                     else if (ev[i].type == INPUT_KEY)
                         handle_key(&ev[i]);
                 }
@@ -892,8 +1279,10 @@ int main(void)
         }
 
         u32 now = uptime();
+        expire_toasts(now);
         if (now - last_sec >= 100) {
             last_sec = now;
+            sample_tray();
             for (int i = 0; i < nz; i++)
                 if (zorder[i]->app->tick)
                     zorder[i]->app->tick(zorder[i], now);
@@ -921,5 +1310,7 @@ int main(void)
     fbmap(NULL, 0, 0);
     if (want_poweroff)
         shutdown(SHUT_POWEROFF);
-    return 0;
+    if (want_reboot)
+        shutdown(SHUT_REBOOT);
+    return exit_code;
 }

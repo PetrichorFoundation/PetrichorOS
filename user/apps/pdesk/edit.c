@@ -91,6 +91,7 @@ static void save(struct editor *e)
     }
     e->modified = 0;
     snprintf(e->status, sizeof e->status, "Saved %d bytes to %s", e->len, e->path);
+    wm_notify("File saved");
     update_title(e);
 }
 
@@ -277,6 +278,24 @@ static void ed_mouse(struct win *w, int x, int y, int kind)
     wm_invalidate(w);
 }
 
+static void ed_wheel(struct win *w, int dir)
+{
+    struct editor *e = w->data;
+    int lines = line_of(e, e->len) + 1, rows = rows_vis(wm_client(w));
+    e->top += dir * 3;
+    if (e->top > lines - rows) e->top = lines - rows;
+    if (e->top < 0) e->top = 0;
+    /* keep the caret on screen by moving it with the view */
+    int ln = line_of(e, e->cur);
+    if (ln < e->top || ln >= e->top + rows) {
+        int target = ln < e->top ? e->top : e->top + rows - 1, pos = 0;
+        for (int i = 0; i < target && pos <= e->len; i++)
+            pos = line_end(e, pos) + 1 > e->len ? e->len : line_end(e, pos) + 1;
+        e->cur = pos;
+    }
+    wm_invalidate(w);
+}
+
 static void ed_close(struct win *w)
 {
     struct editor *e = w->data;
@@ -284,7 +303,8 @@ static void ed_close(struct win *w)
     free(e);
 }
 
-static const struct app editor_app = {.draw = ed_draw, .key = ed_key, .mouse = ed_mouse, .close = ed_close};
+static const struct app editor_app = {.draw = ed_draw, .key = ed_key, .mouse = ed_mouse, .wheel = ed_wheel,
+                                      .close = ed_close};
 
 void editor_open(const char *path)
 {

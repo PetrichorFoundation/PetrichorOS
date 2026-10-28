@@ -336,6 +336,16 @@ static void files_key(struct win *w, struct input_event *e)
     wm_invalidate(w);
 }
 
+static void files_wheel(struct win *w, int dir)
+{
+    struct files *f = w->data;
+    int rows = visible_rows(wm_client(w));
+    f->top += dir * 3;
+    if (f->top > f->n - rows) f->top = f->n - rows;
+    if (f->top < 0) f->top = 0;
+    wm_invalidate(w);
+}
+
 static void files_close(struct win *w)
 {
     struct files *f = w->data;
@@ -344,7 +354,7 @@ static void files_close(struct win *w)
 }
 
 static const struct app files_app = {.draw = files_draw, .key = files_key, .mouse = files_mouse,
-                                     .close = files_close};
+                                     .wheel = files_wheel, .close = files_close};
 
 void files_open(const char *path)
 {

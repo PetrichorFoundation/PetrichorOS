@@ -401,7 +401,7 @@ int syscall_dispatch(struct regs *r)
             return -EFAULT;
         struct stat *st = (struct stat *)b;
         st->type = ip->type;
-        st->size = ip->type == T_DIR ? inode_nents(ip) : ip->size;
+        st->size = inode_size(ip);
         st->nlink = ip->nlink;
         st->ino = ip->ino;
         return 0;
@@ -537,6 +537,25 @@ int syscall_dispatch(struct regs *r)
             return -EFAULT;
         rtc_read((struct rtc_time *)a);
         return 0;
+    }
+    case SYS_drives: {
+        int max = b < 0 ? 0 : b > NDRIVES ? NDRIVES : b, n = 0;
+        if (!user_ok(a, max * sizeof(struct driveinfo)))
+            return -EFAULT;
+        struct driveinfo *di = (struct driveinfo *)a;
+        for (int i = 0; i < NDRIVES && n < max; i++) {
+            if (!ata_present(i))
+                continue;
+            memset(&di[n], 0, sizeof di[n]);
+            di[n].sectors = ata_sectors(i);
+            di[n].index = i;
+            di[n].boot = i == 0;
+            strcpy(di[n].name, "hda");
+            di[n].name[2] = 'a' + i;
+            safestrcpy(di[n].model, ata_model(i), sizeof di[n].model);
+            n++;
+        }
+        return n;
     }
     case SYS_shutdown:
         return sys_shutdown(a);

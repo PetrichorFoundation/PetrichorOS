@@ -1,34 +1,34 @@
-/* ATA PIO driver for the primary master (LBA28, polled, no interrupts). */
+/* ATA PIO driver for up to four drives (primary/secondary, master/slave).
+ * LBA28, polled, no interrupts. */
 #include "kernel.h"
-
-#define ATA_DATA   0x1F0
-#define ATA_COUNT  0x1F2
-#define ATA_LBA0   0x1F3
-#define ATA_LBA1   0x1F4
-#define ATA_LBA2   0x1F5
-#define ATA_DRIVE  0x1F6
-#define ATA_CMD    0x1F7
-#define ATA_STATUS 0x1F7
-#define ATA_CTRL   0x3F6
 
 #define ST_ERR 0x01
 #define ST_DRQ 0x08
 #define ST_DF  0x20
 #define ST_BSY 0x80
 
-static int present;
-static u32 total_sectors;
+struct drive {
+    u16 io, ctrl;
+    u8 slave, present;
+    u32 sectors;
+    char model[41];
+};
 
-static void delay400ns(void)
+static struct drive drv[NDRIVES] = {
+    {.io = 0x1F0, .ctrl = 0x3F6}, {.io = 0x1F0, .ctrl = 0x3F6, .slave = 1},
+    {.io = 0x170, .ctrl = 0x376}, {.io = 0x170, .ctrl = 0x376, .slave = 1},
+};
+
+static void delay400ns(struct drive *d)
 {
     for (int i = 0; i < 4; i++)
-        inb(ATA_CTRL);
+        inb(d->ctrl);
 }
 
-static int wait_ready(int need_drq)
+static int wait_ready(struct drive *d, int need_drq)
 {
     for (int i = 0; i < 2000000; i++) {
-        u8 s = inb(ATA_STATUS);
+        u8 s = inb(d->io + 7);
         if (s == 0xFF || (s & ST_BSY))
             continue;
         if (s & (ST_ERR | ST_DF))
@@ -49,70 +49,85 @@ static void outsw(u16 port, const void *buf, u32 words)
     __asm__ volatile("cld; rep outsw" : "+S"(buf), "+c"(words) : "d"(port) : "memory", "cc");
 }
 
-int ata_init(void)
+static int identify(struct drive *d)
 {
-    outb(ATA_CTRL, 0x02);                       /* nIEN: we poll */
-    outb(ATA_DRIVE, 0xA0);
-    delay400ns();
-    outb(ATA_COUNT, 0);
-    outb(ATA_LBA0, 0);
-    outb(ATA_LBA1, 0);
-    outb(ATA_LBA2, 0);
-    outb(ATA_CMD, 0xEC);                        /* IDENTIFY */
-    u8 s = inb(ATA_STATUS);
+    outb(d->ctrl, 0x02);                        /* nIEN: we poll */
+    outb(d->io + 6, 0xA0 | (d->slave << 4));
+    delay400ns(d);
+    for (int r = 2; r <= 5; r++)
+        outb(d->io + r, 0);
+    outb(d->io + 7, 0xEC);                      /* IDENTIFY */
+    u8 s = inb(d->io + 7);
     if (s == 0 || s == 0xFF)
         return -1;
-    for (int i = 0; i < 2000000 && (inb(ATA_STATUS) & ST_BSY); i++)
+    for (int i = 0; i < 2000000 && (inb(d->io + 7) & ST_BSY); i++)
         ;
-    if (inb(ATA_LBA1) || inb(ATA_LBA2))         /* ATAPI or SATA signature: not ours */
+    if (inb(d->io + 4) || inb(d->io + 5))       /* ATAPI/SATA signature: not a plain disk */
         return -1;
-    if (wait_ready(1) < 0)
+    if (wait_ready(d, 1) < 0)
         return -1;
     u16 id[256];
-    insw(ATA_DATA, id, 256);
-    total_sectors = id[60] | ((u32)id[61] << 16);
-    present = total_sectors != 0;
-    return present ? 0 : -1;
+    insw(d->io, id, 256);
+    d->sectors = id[60] | ((u32)id[61] << 16);
+    for (int i = 0; i < 20; i++) {              /* model string: 20 words, bytes swapped */
+        d->model[i * 2] = id[27 + i] >> 8;
+        d->model[i * 2 + 1] = id[27 + i] & 0xFF;
+    }
+    d->model[40] = 0;
+    for (int i = 39; i >= 0 && d->model[i] == ' '; i--)
+        d->model[i] = 0;
+    return d->sectors ? 0 : -1;
 }
 
-u32 ata_sectors(void)
+/* Probes all four slots; returns how many disks answered. */
+int ata_init(void)
 {
-    return present ? total_sectors : 0;
+    int n = 0;
+    for (int i = 0; i < NDRIVES; i++) {
+        drv[i].present = identify(&drv[i]) == 0;
+        n += drv[i].present;
+    }
+    return n;
 }
 
-static int ata_rw(u32 lba, u32 n, void *buf, int write)
+int ata_present(int dev) { return dev >= 0 && dev < NDRIVES && drv[dev].present; }
+u32 ata_sectors(int dev) { return ata_present(dev) ? drv[dev].sectors : 0; }
+const char *ata_model(int dev) { return ata_present(dev) ? drv[dev].model : ""; }
+
+static int ata_rw(int dev, u32 lba, u32 n, void *buf, int write)
 {
-    if (!present || lba + n > total_sectors)
+    if (!ata_present(dev) || lba + n > drv[dev].sectors)
         return -EIO;
+    struct drive *d = &drv[dev];
     u8 *p = buf;
     for (u32 i = 0; i < n; i++, lba++, p += 512) {
-        outb(ATA_DRIVE, 0xE0 | ((lba >> 24) & 0x0F));
-        outb(ATA_COUNT, 1);
-        outb(ATA_LBA0, lba & 0xFF);
-        outb(ATA_LBA1, (lba >> 8) & 0xFF);
-        outb(ATA_LBA2, (lba >> 16) & 0xFF);
-        outb(ATA_CMD, write ? 0x30 : 0x20);
-        delay400ns();
-        if (wait_ready(1) < 0)
+        outb(d->io + 6, 0xE0 | (d->slave << 4) | ((lba >> 24) & 0x0F));
+        outb(d->io + 2, 1);
+        outb(d->io + 3, lba & 0xFF);
+        outb(d->io + 4, (lba >> 8) & 0xFF);
+        outb(d->io + 5, (lba >> 16) & 0xFF);
+        outb(d->io + 7, write ? 0x30 : 0x20);
+        delay400ns(d);
+        if (wait_ready(d, 1) < 0)
             return -EIO;
         if (write) {
-            outsw(ATA_DATA, p, 256);
-            outb(ATA_CMD, 0xE7);                /* flush cache: write-through */
-            if (wait_ready(0) < 0)
+            outsw(d->io, p, 256);
+            outb(d->io + 7, 0xE7);              /* flush cache: write-through */
+            if (wait_ready(d, 0) < 0)
                 return -EIO;
         } else {
-            insw(ATA_DATA, p, 256);
+            insw(d->io, p, 256);
         }
     }
     return 0;
 }
 
-int ata_read(u32 lba, u32 n, void *buf)
+int ata_read(int dev, u32 lba, u32 n, void *buf)
 {
-    return ata_rw(lba, n, buf, 0);
+    return ata_rw(dev, lba, n, buf, 0);
 }
 
-int ata_write(u32 lba, u32 n, const void *buf)
+int ata_write(int dev, u32 lba, u32 n, const void *buf)
 {
-    return ata_rw(lba, n, (void *)buf, 1);
+    return ata_rw(dev, lba, n, (void *)buf, 1);
 }

@@ -81,14 +81,15 @@ static int kbc_wait_read(void)
     return 0;
 }
 
-static void mouse_cmd(u8 v)
+static int mouse_has_wheel;
+
+static int mouse_cmd(u8 v)
 {
     kbc_wait_write();
     outb(0x64, 0xD4);                           /* next byte goes to the mouse */
     kbc_wait_write();
     outb(0x60, v);
-    if (kbc_wait_read())
-        inb(0x60);                              /* ACK (0xFA) */
+    return kbc_wait_read() ? inb(0x60) : -1;     /* ACK (0xFA) or a data byte */
 }
 
 void mouse_init(void)
@@ -106,25 +107,39 @@ void mouse_init(void)
     kbc_wait_write();
     outb(0x60, cfg);
     mouse_cmd(0xF6);                            /* defaults */
+    static const u8 magic[3] = {200, 100, 80};  /* the IntelliMouse "knock": switches on the wheel */
+    for (int i = 0; i < 3; i++) {
+        mouse_cmd(0xF3);
+        mouse_cmd(magic[i]);
+    }
+    mouse_cmd(0xF2);                            /* read device ID: 3 means a wheel */
+    mouse_has_wheel = kbc_wait_read() && inb(0x60) == 3;
     mouse_cmd(0xF4);                            /* start streaming */
     irq_unmask(12);
 }
 
+static int last_buttons;
+
 void mouse_irq(void)
 {
-    static u8 pkt[3];
+    static u8 pkt[4];
     static int n;
     u8 b = inb(0x60);
     if (n == 0 && !(b & 0x08))
         return;                                 /* out of sync: wait for a header byte */
     pkt[n++] = b;
-    if (n < 3)
+    if (n < (mouse_has_wheel ? 4 : 3))
         return;
     n = 0;
     if (pkt[0] & 0xC0)
         return;                                 /* overflow */
     int dx = pkt[1] - ((pkt[0] << 4) & 0x100);
     int dy = pkt[2] - ((pkt[0] << 3) & 0x100);
-    if (input_active())
-        input_push(INPUT_MOUSE, 0, pkt[0] & 7, dx, -dy);   /* PS/2 y grows upward */
+    if (input_active()) {
+        if (dx || dy || (pkt[0] & 7) != last_buttons)
+            input_push(INPUT_MOUSE, 0, pkt[0] & 7, dx, -dy);   /* PS/2 y grows upward */
+        if (mouse_has_wheel && (i8)pkt[3] != 0)
+            input_push(INPUT_WHEEL, 0, 0, 0, (i8)pkt[3] > 0 ? 1 : -1);
+    }
+    last_buttons = pkt[0] & 7;
 }

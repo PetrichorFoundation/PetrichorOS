@@ -100,6 +100,38 @@ void icon_draw(int kind, int x, int y, int size)
         outline(5, 5, 22, 22, RGB(0xa0, 0x30, 0x30), RGB(0xe0, 0x50, 0x48));
         box(14, 8, 4, 10, C_WHITE);
         break;
+    case ICON_SETTINGS: {                                   /* a gear */
+        u32 c = RGB(0xb4, 0xbc, 0xc6), d = RGB(0x60, 0x6a, 0x74);
+        box(11, 3, 10, 26, d);  box(3, 11, 26, 10, d);
+        box(7, 7, 18, 18, d);
+        box(12, 4, 8, 24, c);   box(4, 12, 24, 8, c);
+        box(8, 8, 16, 16, c);
+        box(12, 12, 8, 8, RGB(0x34, 0x3c, 0x44));          /* hub */
+        break;
+    }
+    case ICON_INSTALL:
+        outline(3, 14, 26, 14, RGB(0x60, 0x68, 0x70), RGB(0xc8, 0xcc, 0xd0));
+        box(23, 22, 3, 2, RGB(0x6c, 0xe0, 0x6c));
+        box(13, 2, 6, 9, RGB(0x4a, 0x90, 0xd9));           /* arrow pointing down into the disk */
+        box(9, 9, 14, 2, RGB(0x4a, 0x90, 0xd9));
+        box(11, 11, 10, 2, RGB(0x4a, 0x90, 0xd9));
+        box(13, 13, 6, 1, RGB(0x4a, 0x90, 0xd9));
+        break;
+    case ICON_RESTART:
+        outline(5, 5, 22, 22, RGB(0x30, 0x70, 0xb0), RGB(0x4a, 0x90, 0xd9));
+        box(10, 10, 12, 2, C_WHITE); box(10, 10, 2, 12, C_WHITE);
+        box(10, 20, 12, 2, C_WHITE); box(20, 14, 2, 8, C_WHITE);
+        break;
+    case ICON_PALETTE:
+        outline(2, 4, 28, 24, RGB(0x70, 0x78, 0x80), RGB(0xf4, 0xf5, 0xf6));
+        box(6, 8, 9, 7, RGB(0x4a, 0x90, 0xd9)); box(17, 8, 9, 7, RGB(0x3f, 0xae, 0x72));
+        box(6, 17, 9, 7, RGB(0xe0, 0x8a, 0x3c)); box(17, 17, 9, 7, RGB(0x9a, 0x6a, 0xd8));
+        break;
+    case ICON_RUN:
+        outline(2, 6, 28, 20, RGB(0x50, 0x58, 0x60), RGB(0xf0, 0xf2, 0xf4));
+        box(5, 12, 4, 8, RGB(0x4a, 0x90, 0xd9));
+        box(11, 15, 14, 2, RGB(0x90, 0x98, 0xa0));
+        break;
     case ICON_LOGOUT:
         outline(4, 6, 16, 20, RGB(0x60, 0x68, 0x70), RGB(0xd0, 0xd4, 0xd8));
         box(16, 14, 12, 4, RGB(0x40, 0x80, 0xc0));

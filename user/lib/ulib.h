@@ -48,6 +48,7 @@ int settimeout(int fd, u32 ms);
 int poll(struct pollfd *fds, int n, int timeout_ms);   /* timeout < 0: wait forever */
 int fbmap(struct fbinfo *fb, u32 w, u32 h);            /* fb == NULL: back to text mode */
 int gettime(struct rtc_time *t);
+int drives(struct driveinfo *out, int max);          /* number of disks found */
 
 /* libc-ish helpers (user/lib/ulib.c) */
 int wait(int *status);

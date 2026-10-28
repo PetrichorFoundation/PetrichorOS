@@ -110,6 +110,15 @@ static struct inode *lookup(struct inode *dp, const char *name)
     return d ? d->ip : NULL;
 }
 
+u32 inode_size(struct inode *ip)
+{
+    if (ip->type == T_DIR)
+        return inode_nents(ip);
+    if (ip->type == T_DEV && ip->major == DEV_DISK)
+        return ata_sectors(ip->minor) * 512;
+    return ip->size;
+}
+
 u32 inode_nents(struct inode *ip)
 {
     return ip->pfs ? pfs_nents(ip) : ip->nents;
@@ -377,11 +386,13 @@ int fs_getcwd(struct inode *ip, char *buf, u32 size)
 
 /* ---------------- boot-time setup ---------------- */
 
-static void make_dev(const char *path, int major)
+static void make_dev(const char *path, int major, int minor)
 {
     struct inode *ip;
-    if (fs_create(path, T_DEV, &ip) == 0)
+    if (fs_create(path, T_DEV, &ip) == 0) {
         ip->major = major;
+        ip->minor = minor;
+    }
 }
 
 void fs_init(void)
@@ -393,12 +404,19 @@ void fs_init(void)
 
     fs_create("/dev", T_DIR, NULL);
     fs_create("/disk", T_DIR, NULL);
-    make_dev("/dev/console", DEV_CONSOLE);
-    make_dev("/dev/tty", DEV_CONSOLE);
-    make_dev("/dev/null", DEV_NULL);
-    make_dev("/dev/zero", DEV_ZERO);
-    make_dev("/dev/random", DEV_RANDOM);
-    make_dev("/dev/input", DEV_INPUT);
+    make_dev("/dev/console", DEV_CONSOLE, 0);
+    make_dev("/dev/tty", DEV_CONSOLE, 0);
+    make_dev("/dev/null", DEV_NULL, 0);
+    make_dev("/dev/zero", DEV_ZERO, 0);
+    make_dev("/dev/random", DEV_RANDOM, 0);
+    make_dev("/dev/input", DEV_INPUT, 0);
+    for (int i = 0; i < NDRIVES; i++) {                 /* raw disks: /dev/hda../dev/hdd */
+        if (ata_present(i)) {
+            char path[] = "/dev/hda";
+            path[7] = 'a' + i;
+            make_dev(path, DEV_DISK, i);
+        }
+    }
 }
 
 /* The initrd is a flat table of {path, type, size, offset} followed by data. */

@@ -78,7 +78,7 @@ static struct buf *getbuf(u32 blk, int read)
     victim->valid = 1;
     victim->stamp = ++stamp;
     if (read) {
-        if (ata_read(PART_LBA + blk * SPB, SPB, victim->data) < 0) {
+        if (ata_read(0, PART_LBA + blk * SPB, SPB, victim->data) < 0) {
             kprintf("[pfs ] read error on block %u\n", blk);
             memset(victim->data, 0, BLK);
         }
@@ -93,7 +93,7 @@ static struct buf *bnew(u32 blk) { return getbuf(blk, 0); }
 
 static void bwrite(struct buf *b)
 {
-    if (ata_write(PART_LBA + b->blk * SPB, SPB, b->data) < 0)
+    if (ata_write(0, PART_LBA + b->blk * SPB, SPB, b->data) < 0)
         kprintf("[pfs ] write error on block %u\n", b->blk);
 }
 
@@ -528,9 +528,9 @@ static int format(u32 nblocks)
 
 int pfs_mount(struct inode *mp)
 {
-    if (ata_init() < 0)
+    if (!ata_present(0))
         return -ENODEV;
-    u32 sectors = ata_sectors();
+    u32 sectors = ata_sectors(0);
     if (sectors <= PART_LBA + 64 * SPB)
         return -ENODEV;
     u32 nblocks = (sectors - PART_LBA) / SPB;

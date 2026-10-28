@@ -28,14 +28,36 @@ void kmain(u32 magic, u32 *mbi)
             kb = 512 * 1024;
     }
 
+    static char cmdline[128];
+    if ((mbi[0] & 4) && mbi[4]) {                   /* flags bit 2: a command line from the loader */
+        const char *src = (const char *)mbi[4];
+        u32 n = 0;
+        while (src[n] && n < sizeof cmdline - 1) {
+            cmdline[n] = src[n];
+            n++;
+        }
+        cmdline[n] = 0;
+    }
+
     gdt_init();
     idt_init();
     mem_init(kb * 1024);
+    int ndisks = ata_init();
+    kprintf("[ata ] %d disk%s\n", ndisks, ndisks == 1 ? "" : "s");
     fs_init();
     initrd_load(_initrd_start, _initrd_end - _initrd_start);
     {
+        struct inode *ci;
+        if (fs_create("/etc/cmdline", T_FILE, &ci) == 0 && cmdline[0])
+            inode_write(ci, 0, cmdline, strlen(cmdline));
+        if (cmdline[0])
+            kprintf("[boot] command line: %s\n", cmdline);
+    }
+    {
         struct inode *mp;
-        if (fs_lookup("/disk", &mp) == 0) {
+        if (strstr(cmdline, "nodisk")) {
+            kprintf("[disk] safe mode: not mounting /disk\n");
+        } else if (fs_lookup("/disk", &mp) == 0) {
             int e = pfs_mount(mp);
             if (e < 0)
                 kprintf("[disk] no usable disk (%d): /disk stays empty\n", e);

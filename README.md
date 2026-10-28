@@ -16,14 +16,27 @@ no borrowed kernel or libc: the kernel, C library, shell and utilities are all i
 
 ```sh
 brew install lld qemu     # plus clang (Xcode command line tools)
-make run                  # boots build/disk.img through Petrichor's own bootloader
+make run                  # boots build/disk.img: boot menu, then straight into the desktop
 make run-nographic        # same, with the serial console in your terminal (Ctrl-A X quits)
 make run-multiboot        # skip the bootloader: QEMU loads the kernel directly
 ```
 
-Then try: `help`, `ls /bin`, `selftest`, `df`, `ifconfig`, `ping 10.0.2.2`,
-`nslookup example.com`, `wget http://example.com/`, and **`pdesk`** to start the desktop.
-`halt` powers the VM off.
+Petrichor shows a boot menu (it boots the first entry after four seconds), then starts the graphical
+desktop by itself. Choose "text console" in the menu, or "Exit to Console" in the Applications menu,
+for a shell. In a shell try `help`, `ls /bin`, `selftest`, `df`, `lsdisk`, `ifconfig`,
+`ping 10.0.2.2`, `nslookup example.com`; `pdesk` starts the desktop and `halt` powers off.
+
+**Installing.** The installer copies Petrichor to a second disk:
+
+```sh
+make run-installer        # boots the installer medium with a blank second disk attached
+                          #   then double-click "Install" on the desktop and follow the wizard
+make run-installed        # boots the disk the installer wrote, with no installer medium
+```
+
+`pinstall` is the engine behind the wizard and also works from a shell (`pinstall`, or
+`pinstall -y hdb`). It refuses to touch the disk it is running from, verifies the copy byte for byte,
+and leaves the data partition to be formatted on the new disk's first boot.
 
 **Package manager demo.** In one terminal on the host run `make serve-repo` (serves `build/repo` on
 port 8080), then inside Petrichor: `ppm update`, `ppm search`, `ppm install lolcow`, `lolcow`.
@@ -35,9 +48,16 @@ Files you put in `/disk` survive reboots (`make` updates the bootloader and kern
 
 **Bootloader** (`boot/`, from scratch, real-mode assembly). BIOS loads the 512-byte MBR, which
 loads stage 2 with INT 13h extended reads. Stage 2 enables A20, asks the BIOS for the RAM size
-(INT 15h/E801), copies the kernel above 1 MiB in 32 KiB chunks (INT 15h/87h), switches to
-32-bit protected mode and jumps to the kernel using the Multiboot register convention.
+(INT 15h/E801), shows a boot menu (arrow keys or 1-4, auto-boot after four seconds), copies the
+kernel above 1 MiB in 32 KiB chunks (INT 15h/87h), switches to 32-bit protected mode and jumps to the
+kernel using the Multiboot register convention, passing the chosen entry as a kernel command line.
 `tools/mkdisk` lays it all out on the disk image.
+
+**Boot flow.** The kernel exposes the command line as `/etc/cmdline` (`mode=text`, `mode=desktop`,
+`nodisk`). `init` reads it, falling back to `autostart=` in `/disk/etc/petrichor.conf` (set in
+Settings) and then to the desktop. If the desktop can't start or keeps crashing, `init` falls back
+to the text console. Logging out restarts the desktop; "Exit to Console" opens a shell and returns
+to the desktop when it exits.
 
 **Kernel** (`kernel/`, ~5,000 lines of C and assembly)
 
@@ -48,9 +68,9 @@ loads stage 2 with INT 13h extended reads. Stage 2 enables A20, asks the BIOS fo
 | Memory | Physical frame bitmap, first-fit kernel heap, 2-level paging, per-process address spaces, shared device-memory mappings |
 | Processes | `fork`, `exec` (ELF32 and `#!` scripts), `wait`, `exit`, `kill`, process groups, preemptive round-robin scheduler for user code, sleep/wakeup with timeouts, `poll` |
 | Filesystems | A RAM filesystem for `/` (unpacked from an initrd) and **PFS**, an on-disk filesystem mounted at `/disk` (below) |
-| Disk | ATA PIO driver (LBA28), 64-block write-through buffer cache |
+| Disk | ATA PIO driver for up to four drives (LBA28), raw `/dev/hda`..`hdd` block devices, 64-block write-through buffer cache |
 | Network | PCI scan, RTL8139 driver, ARP, IPv4, ICMP, UDP, TCP client (below) |
-| Graphics and input | Bochs/QEMU VBE linear framebuffer (1024x768x32), raw keyboard events (arrows, F-keys, modifiers), PS/2 mouse, `/dev/input` event stream, CMOS real-time clock |
+| Graphics and input | Bochs/QEMU VBE linear framebuffer (1024x768x32), raw keyboard events (arrows, F-keys, modifiers), PS/2 mouse with scroll wheel, `/dev/input` event stream, CMOS real-time clock |
 | I/O | Pipes, sockets, VGA text console with ANSI colors, 16550 serial, PS/2 keyboard, a cooked tty with line editing, `^C`, `^D` |
 | Isolation | User pointers are validated; faults and wild pointers kill only the offending process |
 
@@ -66,17 +86,21 @@ formats the partition on first boot.
 `sendto`, `recvfrom`, plus ordinary `read`/`write`. TCP is a client with stop-and-wait
 transmission, retransmission with timeouts, and orderly close; there is no listen/accept yet.
 
-**Desktop** (`user/apps/pdesk`, started with `pdesk`). Real XFCE can't run here (it needs X11, GTK,
-glib, a POSIX libc, dynamic linking and threads), so Petrichor has its own XFCE-style desktop,
-written from scratch on top of the framebuffer and input devices:
+**Desktop** (`user/apps/pdesk`; starts automatically at boot, or run `pdesk`). Real XFCE can't run
+here (it needs X11, GTK, glib, a POSIX libc, dynamic linking and threads), so Petrichor has its own
+XFCE-style desktop, written from scratch on top of the framebuffer and input devices:
 
-- window manager: draggable, resizable, minimizable, maximizable windows with shadows, Alt+Tab,
-  Alt+F4, double-click-title maximize, damage-tracked repainting and a software mouse cursor
-- panel with Applications menu, taskbar and clock; a floating dock; desktop icons
-- apps: **Terminal** (runs `sh` over pipes, ANSI colors, scrollback, `^C`/`^D`), **File Manager**
-  (places sidebar, new folder/file, delete, opens text files in the editor and programs in a
-  terminal), **Text Editor** (line numbers, auto-indent, `Ctrl+S`), **System Monitor** (CPU
-  history, memory/heap/disk bars, process table with End Process), and About
+- window manager: draggable, resizable, minimizable, maximizable windows with shadows, edge snapping
+  (left/right half, top to maximize), Alt+Tab, Alt+F4, Alt+F2 (Run), double-click-title maximize,
+  damage-tracked repainting and a software mouse cursor
+- panel with Applications menu, taskbar, system tray (network, CPU, memory) and clock with a calendar
+  popup; a floating dock; desktop icons; right-click context menu; toast notifications
+- appearance: five wallpapers and six accent colors, saved in `/disk/etc/pdesk.conf`
+- apps: **Terminal** (runs `sh` over pipes, ANSI colors, wheel/PgUp scrollback, `^C`/`^D`),
+  **File Manager**, **Text Editor**, **System Monitor**, **Software** (a front-end for `ppm`:
+  browse, install, remove, upgrade), **Settings** (appearance, startup mode, system info,
+  shortcuts), **Run Program**, **Install Petrichor** (wizard, shown when a second disk is attached),
+  and About
 - needs QEMU's default VGA (`-vga std`); other graphics hardware isn't supported yet
 
 **Package manager** (`ppm`). Packages are `.ppk` archives served over HTTP from a repository whose
@@ -121,26 +145,29 @@ tools/      host tools: mkinitrd (root image), mkdisk (bootloader + kernel -> di
 
 ## Testing
 
-`selftest` (run inside Petrichor) performs 79 end-to-end checks of files, directories, the on-disk
-filesystem (including a 100 KiB file across indirect blocks), devices, sockets, `#!` scripts,
+`selftest` (run inside Petrichor) performs 85 end-to-end checks of files, directories, the on-disk
+filesystem (including a 100 KiB file across indirect blocks), raw disks, devices, sockets, `#!` scripts,
 `poll`, the clock, fork/exec/wait/kill, pipes (including blocking on a full pipe), the heap, and a
 physical-memory leak check across repeated fork/exit. Checks that need a disk or NIC are skipped
-if none is attached. The desktop and package manager were tested by driving QEMU's monitor
-(injected mouse/keys plus screenshots) and a host HTTP server.
+if none is attached. The desktop, installer, boot menu and package manager were tested by driving
+QEMU's monitor (injected mouse/keys plus screenshots), a two-disk setup, and a host HTTP server.
 
 ## Limits and ideas
 
 Single CPU, no SMP. The kernel is 32-bit with at most 512 MiB of RAM. The root filesystem isn't
 persistent, PFS has no journal and caps files at ~4 MiB, and the ATA driver is polled PIO (no
-DMA, no SATA/AHCI, no partition table). The network stack has no DHCP (static QEMU addresses),
-IP fragmentation, TCP listen/accept, or window-based flow control; only the RTL8139 is
-supported. Graphics use the Bochs/QEMU VBE interface only, so there is no real-GPU support and the
-desktop runs in a single process (apps are built in rather than separate clients talking to a
-window server). `ppm` has no package signatures beyond SHA-256 in the index, and the repository
-is plain HTTP. There are no real signals (`kill` terminates), no copy-on-write `fork`, and the
-bootloader is BIOS-only. The bitmap font is the standard VGA text-mode font as rendered by QEMU's
-VGA BIOS (LGPL-licensed); swap in your own if you need different terms.
+DMA, no SATA/AHCI, no partition table). The installer needs a second disk and copies the whole
+boot region; there is no partitioning, no choice of what to install, and no boot loader chaining
+to other operating systems. It is BIOS-only (no UEFI), so it targets QEMU/BIOS machines rather than
+modern real hardware. The network stack has no DHCP (static QEMU addresses), IP fragmentation, TCP
+listen/accept, or window-based flow control; only the RTL8139 is supported. Graphics use the
+Bochs/QEMU VBE interface only, so there is no real-GPU support and the desktop runs in a single
+process (apps are built in rather than separate clients talking to a window server). Terminal
+lines don't reflow when a window is resized. `ppm` has no package signatures beyond SHA-256 in
+the index, and the repository is plain HTTP. There are no real signals (`kill` terminates) and no
+copy-on-write `fork`. The bitmap font is the standard VGA text-mode font as rendered by QEMU's VGA
+BIOS (LGPL-licensed); swap in your own if you need different terms.
 
-Natural next steps: a window-server protocol so separate programs can open windows, a USB-free
-mouse wheel and clipboard, DHCP and `listen`/`accept`, an e1000 driver, DMA disk I/O, a journal,
-signed packages, a persistent root filesystem, real signals, a 64-bit port.
+Natural next steps: a window-server protocol so separate programs can open windows, clipboard and
+text selection, a login screen, DHCP and `listen`/`accept`, an e1000 driver, DMA disk I/O, UEFI
+boot, partitioning in the installer, a journal, signed packages, real signals, a 64-bit port.

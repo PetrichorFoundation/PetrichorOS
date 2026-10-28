@@ -254,7 +254,17 @@ static void term_key(struct win *w, struct input_event *e)
     wm_invalidate_rect(w->x, w->y + TITLE_H, w->w, w->h - TITLE_H);
 }
 
+static void term_wheel(struct win *w, int dir)
+{
+    struct term *t = w->data;
+    t->scroll -= dir * 3;
+    if (t->scroll < 0)
+        t->scroll = 0;
+    wm_invalidate_rect(w->x, w->y + TITLE_H, w->w, w->h - TITLE_H);
+}
+
 static const struct app term_app = {
+    .wheel = term_wheel,
     .draw = term_draw,
     .key = term_key,
     .pollfd = term_pollfd,

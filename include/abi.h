@@ -48,10 +48,12 @@
 #define SYS_poll      42
 #define SYS_fbmap     43
 #define SYS_gettime   44
+#define SYS_drives    45
 
 /* input events (read from /dev/input) */
 #define INPUT_KEY   1
 #define INPUT_MOUSE 2
+#define INPUT_WHEEL 3           /* dy = +1 scroll down, -1 scroll up */
 #define IEF_DOWN    0x01        /* key: pressed (else released) */
 #define IEF_SHIFT   0x02
 #define IEF_CTRL    0x04
@@ -185,6 +187,13 @@ struct input_event {
     u8 flags;
     u16 code;                   /* key code, or mouse button mask */
     i16 dx, dy;                 /* mouse motion (y grows downward) */
+};
+
+struct driveinfo {
+    u32 sectors;                /* 512-byte sectors */
+    u8 index, boot, pad[2];     /* boot: the disk this system booted from and mounts as /disk */
+    char name[8];               /* "hda".. */
+    char model[40];
 };
 
 struct pollfd {

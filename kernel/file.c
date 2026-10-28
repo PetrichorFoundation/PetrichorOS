@@ -136,6 +136,29 @@ static int dev_write(struct inode *ip, const void *src, u32 n)
     return -ENODEV;
 }
 
+/* Raw disk access: whole sectors at sector-aligned offsets, up to 128 KiB per call. */
+static int disk_rw(struct file *f, void *buf, u32 n, int write)
+{
+    int dev = f->ip->minor;
+    if (f->off % 512)
+        return -EINVAL;
+    n &= ~511u;
+    if (!n)
+        return -EINVAL;
+    u32 lba = f->off / 512, total = ata_sectors(dev);
+    if (lba >= total)
+        return 0;                               /* end of disk */
+    if (n > 128 * 1024)
+        n = 128 * 1024;
+    if (lba + n / 512 > total)
+        n = (total - lba) * 512;
+    int r = write ? ata_write(dev, lba, n / 512, buf) : ata_read(dev, lba, n / 512, buf);
+    if (r < 0)
+        return r;
+    f->off += n;
+    return n;
+}
+
 /* ---------------- file operations ---------------- */
 
 void file_close(struct file *f)
@@ -167,6 +190,8 @@ int file_read(struct file *f, void *dst, u32 n)
     case T_DIR:
         return -EISDIR;
     case T_DEV:
+        if (ip->major == DEV_DISK)
+            return disk_rw(f, dst, n, 0);
         return dev_read(ip, dst, n);
     default: {
         int r = inode_read(ip, f->off, dst, n);
@@ -190,6 +215,8 @@ int file_write(struct file *f, const void *src, u32 n)
     case T_DIR:
         return -EISDIR;
     case T_DEV:
+        if (ip->major == DEV_DISK)
+            return disk_rw(f, (void *)src, n, 1);
         return dev_write(ip, src, n);
     default: {
         if (f->append)
@@ -219,7 +246,7 @@ int file_stat(struct file *f, struct stat *st)
         return 0;
     }
     st->type = f->ip->type;
-    st->size = f->ip->type == T_DIR ? inode_nents(f->ip) : f->ip->size;
+    st->size = inode_size(f->ip);
     st->nlink = f->ip->nlink;
     st->ino = f->ip->ino;
     return 0;
@@ -238,13 +265,14 @@ int file_readdir(struct file *f, struct dirent *de)
 
 int file_seek(struct file *f, int off, int whence)
 {
-    if (f->type != FD_INODE || f->ip->type != T_FILE)
+    if (f->type != FD_INODE ||
+        !(f->ip->type == T_FILE || (f->ip->type == T_DEV && f->ip->major == DEV_DISK)))
         return -ESPIPE;
     int base;
     switch (whence) {
     case SEEK_SET: base = 0; break;
     case SEEK_CUR: base = f->off; break;
-    case SEEK_END: base = f->ip->size; break;
+    case SEEK_END: base = inode_size(f->ip); break;
     default: return -EINVAL;
     }
     if (base + off < 0)

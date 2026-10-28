@@ -27,6 +27,8 @@
 #define DEV_ZERO    3
 #define DEV_RANDOM  4
 #define DEV_INPUT   5
+#define DEV_DISK    6   /* raw disk; minor = drive index */
+#define NDRIVES     4
 
 /* Register snapshot built by isr_common (see isr.S). */
 struct regs {
@@ -62,7 +64,7 @@ struct inode {
     u8 *data;
     struct dent *ents;         /* directories (includes "." and "..") */
     u32 nents, cap_ents;
-    int major;                 /* devices */
+    int major, minor;          /* devices */
     struct inode *parent;      /* directories (RAM filesystem) */
 
     /* mounts */
@@ -176,13 +178,16 @@ void iref(struct inode *ip);
 void iput(struct inode *ip);
 int fs_getcwd(struct inode *ip, char *buf, u32 size);
 u32 inode_nents(struct inode *ip);
+u32 inode_size(struct inode *ip);                    /* bytes (entries for a directory) */
 int inode_dirent(struct inode *ip, u32 idx, struct dirent *de);
 
 /* ata.c */
 int ata_init(void);
-u32 ata_sectors(void);
-int ata_read(u32 lba, u32 n, void *buf);
-int ata_write(u32 lba, u32 n, const void *buf);
+int ata_present(int dev);
+u32 ata_sectors(int dev);
+const char *ata_model(int dev);
+int ata_read(int dev, u32 lba, u32 n, void *buf);
+int ata_write(int dev, u32 lba, u32 n, const void *buf);
 
 /* pfs.c: on-disk filesystem */
 int pfs_mount(struct inode *mountpoint);

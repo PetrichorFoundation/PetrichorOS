@@ -239,6 +239,26 @@ static void test_scripts_poll_clock(void)
           "RTC returns a plausible date");
 }
 
+static void test_raw_disk(void)
+{
+    printf("raw disks\n");
+    struct driveinfo d[4];
+    int n = drives(d, 4);
+    CHECK(n >= 1 && d[0].boot && d[0].name[0] == 'h' && d[0].sectors > 8192, "drives() reports the boot disk");
+    if (n < 1)
+        return;
+    unsigned char sec[512];
+    int fd = open("/dev/hda", O_RDONLY);
+    CHECK(fd >= 0 && read(fd, sec, 512) == 512 && sec[510] == 0x55 && sec[511] == 0xAA,
+          "/dev/hda starts with a boot sector (55 AA)");
+    CHECK(read(fd, sec, 100) == -EINVAL, "raw reads must be whole sectors");
+    CHECK(lseek(fd, 0, SEEK_END) == (int)(d[0].sectors * 512) && read(fd, sec, 512) == 0, "seek to the end of the disk");
+    struct stat st;
+    CHECK(fstat(fd, &st) == 0 && st.size == d[0].sectors * 512, "stat reports the disk size");
+    close(fd);
+    CHECK(open("/dev/hdz", O_RDONLY) == -ENOENT, "no node for an absent disk");
+}
+
 static void test_devices(void)
 {
     printf("devices\n");
@@ -428,6 +448,7 @@ int main(void)
     test_dirs();
     test_devices();
     test_disk();
+    test_raw_disk();
     test_sockets();
     test_scripts_poll_clock();
     test_processes();

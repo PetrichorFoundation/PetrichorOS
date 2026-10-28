@@ -37,7 +37,7 @@ $(foreach a,$(UAPPS),$(eval $(call APP_RULE,$(a))))
 UEXE += $(addprefix $B/user/out/,$(UAPPS))
 
 .DEFAULT_GOAL := all
-.PHONY: all run run-multiboot run-nographic clean
+.PHONY: all run run-multiboot run-nographic run-installer run-installed clean-target clean
 all: $B/petrichor.elf $B/disk.img $B/repo/index
 
 $B/petrichor.elf: $(KOBJ) kernel/kernel.ld
@@ -123,10 +123,26 @@ $B/initrd.img: $B/mkinitrd $(UEXE) $(ROOTFILES)
 	$B/mkinitrd $@ $B/root
 
 # ---- running ----
-QEMUFLAGS := -m 128 -no-reboot -drive file=$B/disk.img,format=raw,if=ide -nic user,model=rtl8139
+QEMUFLAGS := -m 128 -no-reboot -drive file=$B/disk.img,format=raw,if=ide,index=0 -nic user,model=rtl8139
+
+# A blank disk to install onto (kept between runs; `make clean-target` recreates it).
+$B/target.img:
+	@mkdir -p $B
+	dd if=/dev/zero of=$@ bs=1048576 count=64 2>/dev/null
 
 run: all
 	$(QEMU) $(QEMUFLAGS) -serial stdio
+
+# Boot the installer medium with a blank second disk, then run "Install Petrichor" on the desktop.
+run-installer: all $B/target.img
+	$(QEMU) $(QEMUFLAGS) -drive file=$B/target.img,format=raw,if=ide,index=1 -serial stdio
+
+# Boot the disk the installer wrote, with no installer medium attached.
+run-installed: all $B/target.img
+	$(QEMU) -m 128 -no-reboot -drive file=$B/target.img,format=raw,if=ide,index=0 -nic user,model=rtl8139 -serial stdio
+
+clean-target:
+	rm -f $B/target.img
 
 run-multiboot: all
 	$(QEMU) $(QEMUFLAGS) -kernel $B/petrichor.elf -serial stdio

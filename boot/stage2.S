@@ -27,15 +27,13 @@ stage2_main:
     sti
     mov byte ptr [boot_drive], dl
 
-    mov si, offset msg_banner
-    call print
-
     in al, 0x92                     # fast A20
     or al, 2
     and al, 0xFE
     out 0x92, al
 
     call get_memory
+    call boot_menu                  # sets the command line for the chosen entry
 
     mov si, offset msg_load
     call print
@@ -118,6 +116,210 @@ print:
     call putc
     jmp print
 2:  ret
+
+
+# ---------------- boot menu ----------------
+.set TIMEOUT_TICKS, 73              # ~4 seconds at 18.2 Hz
+.set N_ENTRIES, 4
+
+# Writes the string at SI to video memory at DI (a byte offset) with attribute AH.
+vputs:
+    push es
+    push ax
+    mov ax, 0xB800
+    mov es, ax
+    pop ax
+1:  lodsb
+    test al, al
+    jz 2f
+    stosw
+    jmp 1b
+2:  pop es
+    ret
+
+# Fills CX cells at DI with a space of attribute AH.
+vfill:
+    push es
+    push ax
+    mov ax, 0xB800
+    mov es, ax
+    pop ax
+    mov al, ' '
+    rep stosw
+    pop es
+    ret
+
+draw_menu:
+    mov ax, 0x0600                  # clear the screen
+    mov bh, 0x07
+    xor cx, cx
+    mov dx, 0x184F
+    int 0x10
+
+    mov di, 2*80*2 + 6*2
+    mov si, offset txt_title
+    mov ah, 0x0B
+    call vputs
+    mov di, 3*80*2 + 6*2
+    mov si, offset txt_sub
+    mov ah, 0x03
+    call vputs
+
+    xor bx, bx                      # entry index
+.entry:
+    mov ax, bx
+    mov cx, 160
+    mul cx                          # ax = index * 160 (one text row)
+    mov di, ax
+    add di, 7*160 + 8*2
+    mov ah, 0x07
+    mov si, offset txt_blank
+    cmp bl, byte ptr [sel]
+    jne 1f
+    push di
+    sub di, 4
+    mov cx, 50
+    mov ah, 0x70
+    call vfill                      # highlight bar
+    pop di
+    mov ah, 0x70
+1:  mov si, bx
+    shl si, 1
+    mov si, word ptr [entry_text + si]
+    call vputs
+    inc bx
+    cmp bx, N_ENTRIES
+    jb .entry
+
+    mov di, 14*160 + 8*2
+    mov si, offset txt_help
+    mov ah, 0x08
+    call vputs
+    cmp byte ptr [auto], 0
+    je 1f
+    mov di, 16*160 + 8*2
+    mov si, offset txt_count
+    mov ah, 0x0E
+    call vputs
+    mov al, byte ptr [secs]
+    add al, '0'
+    mov ah, 0x0E
+    push es
+    push ax
+    mov ax, 0xB800
+    mov es, ax
+    pop ax
+    stosw
+    pop es
+    mov si, offset txt_sec
+    mov ah, 0x0E
+    call vputs
+1:  ret
+
+boot_menu:
+    mov byte ptr [sel], 0
+    mov byte ptr [auto], 1
+    xor ah, ah
+    int 0x1A                        # CX:DX = BIOS tick count
+    add dx, TIMEOUT_TICKS
+    mov word ptr [deadline], dx
+    mov byte ptr [secs], 0xFF
+.loop:
+    cmp byte ptr [auto], 0
+    je .poll
+    xor ah, ah
+    int 0x1A
+    mov ax, word ptr [deadline]
+    sub ax, dx                      # ticks remaining (16-bit, signed)
+    jle .chosen                     # deadline passed: boot the highlighted entry
+    xor dx, dx
+    mov cx, 19
+    div cx
+    inc al                          # whole seconds left, rounded up
+    cmp al, byte ptr [secs]
+    je .poll
+    mov byte ptr [secs], al
+    call draw_menu
+.poll:
+    cmp byte ptr [auto], 0
+    jne 1f
+    cmp byte ptr [secs], 0xFE       # first redraw after the countdown is cancelled
+    je 1f
+    mov byte ptr [secs], 0xFE
+    call draw_menu
+1:  mov ah, 1
+    int 0x16
+    jz .loop
+    xor ah, ah
+    int 0x16                        # AH = scan code, AL = ASCII
+    mov byte ptr [auto], 0
+    cmp ah, 0x48
+    je .up
+    cmp ah, 0x50
+    je .down
+    cmp al, 13
+    je .chosen
+    cmp al, '1'
+    jb .loop
+    cmp al, '0' + N_ENTRIES
+    ja .loop
+    sub al, '1'
+    mov byte ptr [sel], al
+    jmp .chosen
+.up:
+    cmp byte ptr [sel], 0
+    je .redraw
+    dec byte ptr [sel]
+    jmp .redraw
+.down:
+    cmp byte ptr [sel], N_ENTRIES - 1
+    jae .redraw
+    inc byte ptr [sel]
+.redraw:
+    mov byte ptr [secs], 0xFD
+    call draw_menu
+    jmp .loop
+
+.chosen:
+    mov ax, 0x0003                  # leave a clean screen for the loader messages
+    int 0x10
+    mov si, offset msg_banner
+    call print
+
+    # copy the entry's command line to 0x520 and advertise it in the info struct
+    movzx bx, byte ptr [sel]
+    shl bx, 1
+    mov si, word ptr [entry_cmd + bx]
+    mov di, 0x520
+1:  lodsb
+    stosb
+    test al, al
+    jnz 1b
+    or dword ptr [MBI], 4           # flags bit 2: command line present
+    mov dword ptr [MBI + 16], 0x520
+    ret
+
+.align 2
+entry_text: .word ent0, ent1, ent2, ent3
+entry_cmd:  .word cmd0, cmd1, cmd2, cmd3
+ent0: .asciz "1  Petrichor"
+ent1: .asciz "2  Petrichor (text console)"
+ent2: .asciz "3  Petrichor (graphical desktop)"
+ent3: .asciz "4  Petrichor safe mode (no disk)"
+cmd0: .asciz ""
+cmd1: .asciz "mode=text"
+cmd2: .asciz "mode=desktop"
+cmd3: .asciz "mode=text nodisk"
+txt_title: .asciz "Petrichor Boot Menu"
+txt_sub:   .asciz "the smell of rain on dry earth"
+txt_help:  .asciz "Use the Up/Down keys and Enter, or press 1-4."
+txt_count: .asciz "Booting the first entry in "
+txt_sec:   .asciz " s  (press any key to stop)"
+txt_blank: .asciz ""
+sel:      .byte 0
+auto:     .byte 1
+secs:     .byte 0
+deadline: .word 0
 
 # Fills the Multiboot-style info struct: flags=1 (memory fields valid).
 get_memory:
