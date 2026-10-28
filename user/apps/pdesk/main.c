@@ -1284,14 +1284,18 @@ int main(int argc, char **argv)
     u32 last_sec = uptime();
     char last_clock[40] = "";
     while (running) {
-        struct pollfd pf[MAXWIN + 1];
-        struct win *owner[MAXWIN + 1];
+        struct pollfd pf[64];
+        struct win *owner[64];
         int n = 0;
         pf[n] = (struct pollfd){in, POLLIN, 0};
         owner[n++] = NULL;
         for (int i = 0; i < nz; i++) {
             struct win *w = zorder[i];
-            if (w->app->pollfd && n < MAXWIN + 1 && w->app->pollfd(w, &pf[n]))
+            if (w->app->pollfds) {
+                int got = w->app->pollfds(w, &pf[n], 64 - n);
+                for (int k = 0; k < got; k++)
+                    owner[n++] = w;
+            } else if (w->app->pollfd && n < 64 && w->app->pollfd(w, &pf[n]))
                 owner[n++] = w;
         }
         int r = poll(pf, n, 100);

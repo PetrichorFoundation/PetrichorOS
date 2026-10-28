@@ -12,7 +12,8 @@
 #define USER_BASE        0x40000000u
 #define USER_TOP         0xC0000000u
 #define USER_HEAP_MAX    0x7F000000u
-#define USER_STACK_PAGES 32
+#define USER_STACK_PAGES 32              /* mapped at exec; the stack grows on demand up to USER_STACK_MAX */
+#define USER_STACK_MAX   512
 #define TICK_HZ          100
 #define MAXARG           32
 #define PIPE_SIZE        4096

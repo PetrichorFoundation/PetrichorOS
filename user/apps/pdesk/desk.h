@@ -39,6 +39,7 @@ struct app {
     void (*wheel)(struct win *w, int dir);                 /* dir: +1 scroll down, -1 up */
     void (*tick)(struct win *w, u32 now);                  /* roughly once per second */
     int (*pollfd)(struct win *w, struct pollfd *p);        /* 0 or 1 fd to wait on */
+    int (*pollfds)(struct win *w, struct pollfd *p, int max);   /* several fds; returns how many */
     void (*fdready)(struct win *w, struct pollfd *p);
     void (*close)(struct win *w);
 };

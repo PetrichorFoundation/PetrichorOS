@@ -146,17 +146,30 @@ XFCE-style desktop, written from scratch on top of the framebuffer and input dev
   and About
 - needs QEMU's default VGA (`-vga std`); other graphics hardware isn't supported yet
 
-**Web browser** (`user/apps/pdesk/browser.c`, `html.c`; `fetch` for loading). Opens `http://` and
-`https://` pages (a padlock marks a verified connection) and local `file://` pages (including directory listings; `.html` files open here from the File
-Manager). Pages load in a background `fetch` process, which follows redirects and decodes chunked
-responses, so the desktop never freezes. The renderer is written from scratch: headings, paragraphs,
-bold/italic/code, links, nested bulleted and numbered lists, simple tables, preformatted text,
-blockquotes, centered text, entities and common UTF-8 punctuation, with wrapping that follows the
-window size. There is an address bar (bare names like `example.com` work), back/forward/reload/stop,
-home, link hover URLs in the status bar and a draggable scrollbar. Not supported: images (shown as
-`[image: alt]`), CSS, JavaScript, forms that submit, and cookies, so many modern sites are only partly
-usable. It was tested against a local server (redirects, chunked, 404) and real sites over HTTP and
-HTTPS (example.com, Wikipedia, GitHub, Google, Amazon, Cloudflare).
+**Web browser** (`user/apps/pdesk/`: `browser.c`, plus the page engine `dom.c css.c layout.c paint.c img.c`;
+`fetch` does the downloading). Opens `http://` and `https://` pages (a padlock marks a verified connection) and
+local `file://` pages. A page and its stylesheets and images load in background `fetch` processes (three at a
+time), so the desktop never freezes, and the page re-renders as things arrive. The engine is written from scratch:
+
+- **HTML**: a real DOM with implied end tags, entities, tables, lists, forms (drawn, not interactive), `<img>`
+  (including `data:` URIs), `<noscript>` hidden, legacy attributes (`bgcolor`, `align`, `cellpadding`, ...).
+- **CSS**: `<style>`, linked sheets and `style=""`; the cascade with specificity and `!important`; selectors
+  (type, class, id, attribute, descendant/child/sibling combinators, `:first-child`, `:nth-child`, `:not`, ...);
+  custom properties and `var()`; `@media` (width queries); colors (named, hex, `rgb()`, `hsl()`, alpha),
+  `px/em/rem/%/vw/vh`, `calc()` of lengths; fonts (size, weight, style, family -> proportional or monospace),
+  `text-align`, `line-height`, `text-decoration`, `text-transform`, `white-space`; the box model (margin
+  collapsing, padding, borders, `border-radius`, `box-sizing`, min/max sizes), backgrounds (colors, gradients,
+  images with `cover`/`contain`).
+- **Layout**: block and inline flow with line breaking, floats and `clear`, inline-block, **flexbox** (wrap,
+  grow/shrink, justify, align, gaps, auto margins), basic **grid** (explicit and auto-fit columns), tables
+  (column sizing, spans, vertical alignment), list markers.
+- **Images**: PNG (all color types, interlaced), JPEG (baseline and progressive) and GIF decoders, box-filter scaled.
+- **Text**: the 8x16 bitmap font is rendered at any size with per-glyph proportional advances, bold and italic.
+
+Not supported: JavaScript (so no menus, lazy-loaded images or single-page apps), `position: absolute/fixed`
+elements (they are left out), SVG, WebP/AVIF, web fonts (everything uses the built-in font), CSS animations,
+shadows, `::before/::after`, and form submission. It was tested on local pages and on real sites (Wikipedia,
+Hacker News, NPR, example.com).
 
 **HTTPS** (`user/lib/tls/`). A TLS 1.2 client written from scratch, with no third-party code: SHA-2,
 HMAC and the TLS PRF, AES-128/256-GCM, big-integer arithmetic (Montgomery), RSA PKCS#1 v1.5 and ECDSA
@@ -251,7 +264,7 @@ package signatures beyond SHA-256 in the index (the repository can now be served
 signals (`kill` terminates) and no copy-on-write `fork`. The bitmap font is the standard VGA text-mode
 font as rendered by QEMU's VGA BIOS (LGPL-licensed); swap in your own if you need different terms.
 
-Natural next steps: TLS 1.3 and image decoding for the browser, UEFI boot (and GPT), USB (xHCI) keyboard/mouse/storage drivers, more NICs (e1000,
+Natural next steps: TLS 1.3, JavaScript, SVG/WebP and positioned elements for the browser, UEFI boot (and GPT), USB (xHCI) keyboard/mouse/storage drivers, more NICs (e1000,
 RTL8168), AHCI/NVMe interrupts and multiple queues, selectable display modes, partitioning and
 dual-boot in the installer, a window-server protocol, DHCP and `listen`/`accept`, a journal, signed
 packages, real signals, a 64-bit port.

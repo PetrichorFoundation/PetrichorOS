@@ -1,6 +1,6 @@
-/* Web browser: loads pages with /bin/fetch in the background (so the desktop never freezes),
- * renders them with the HTML engine in html.c, and follows links.  Plain HTTP only. */
-#include "html.h"
+/* Web browser: loads pages (and their stylesheets and images) with /bin/fetch in the background so the
+ * desktop never freezes, renders them with the engine in web.h (HTML, CSS, images), and follows links. */
+#include "web.h"
 
 #define TOOL_H   38
 #define STATUS_H 22
@@ -14,8 +14,15 @@ struct hist {
     int scroll;
 };
 
+#define NSLOT 3
+struct rslot {                                  /* one sub-resource download */
+    int fd, pid, res, len, cap;
+    char *buf;
+};
+
 struct browser {
     struct win *win;
+    struct rslot slot[NSLOT];
     struct page page;
     struct hist hist[NHIST];
     int hpos, hcount;
@@ -35,9 +42,9 @@ static const char home_html[] =
     "<html><head><title>Petrichor Browser</title></head><body>"
     "<h1>Petrichor Web Browser</h1>"
     "<p>A small web browser written from scratch for Petrichor. It opens <b>http://</b> and "
-    "<b>https://</b> pages (certificates are checked against the built-in list of trusted authorities) and shows "
-    "headings, text, lists, tables and links. There are no images and no JavaScript, so many modern sites "
-    "won't work.</p>"
+    "<b>https://</b> pages (certificates are checked against the built-in list of trusted authorities) and "
+    "renders them with CSS: colors, fonts, boxes, flexbox, floats, tables, and PNG, JPEG and GIF images. "
+    "There is no JavaScript, so pages that need it will be incomplete.</p>"
     "<h2>Try these</h2>"
     "<ul>"
     "<li><a href=\"https://example.com/\">example.com</a>: the classic example page, over HTTPS</li>"
@@ -112,8 +119,22 @@ static void show_message(struct browser *b, const char *url, const char *headlin
 
 /* ---------------- loading ---------------- */
 
+static void stop_slots(struct browser *b)
+{
+    for (int i = 0; i < NSLOT; i++) {
+        struct rslot *sl = &b->slot[i];
+        if (!sl->buf)
+            continue;
+        kill(sl->pid, 9);
+        close(sl->fd);
+        free(sl->buf);
+        sl->buf = NULL;
+    }
+}
+
 static void stop_fetch(struct browser *b)
 {
+    stop_slots(b);
     if (!b->loading)
         return;
     kill(b->pid, 9);
@@ -121,6 +142,126 @@ static void stop_fetch(struct browser *b)
     b->loading = 0;
     free(b->rbuf);
     b->rbuf = NULL;
+}
+
+/* ---------------- sub-resources: stylesheets first, then images, three at a time ---------------- */
+
+static int next_wanted(struct page *p)
+{
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < p->nres; i++)
+            if (p->res[i].state == RS_WANT && p->res[i].kind == (pass ? R_IMAGE : R_CSS))
+                return i;
+    return -1;
+}
+
+static int css_pending(struct page *p)
+{
+    for (int i = 0; i < p->nres; i++)
+        if (p->res[i].kind == R_CSS && (p->res[i].state == RS_WANT || p->res[i].state == RS_LOADING))
+            return 1;
+    return 0;
+}
+
+static int res_left(struct page *p)
+{
+    int n = 0;
+    for (int i = 0; i < p->nres; i++)
+        if (p->res[i].state == RS_WANT || p->res[i].state == RS_LOADING)
+            n++;
+    return n;
+}
+
+static void pump(struct browser *b)
+{
+    struct page *p = &b->page;
+    for (int i = 0; i < NSLOT; i++) {
+        struct rslot *sl = &b->slot[i];
+        if (sl->buf)
+            continue;
+        int r = next_wanted(p);
+        if (r < 0)
+            break;
+        int fds[2];
+        if (pipe(fds) < 0)
+            break;
+        int pid = fork();
+        if (pid < 0) {
+            close(fds[0]);
+            close(fds[1]);
+            break;
+        }
+        if (pid == 0) {
+            setpgid(0, 0);
+            dup2(fds[1], 1);
+            dup2(fds[1], 2);
+            for (int fd = 3; fd < NOFILE_USER; fd++)
+                close(fd);
+            char *argv[] = {"fetch", p->res[r].url, NULL};
+            exec("/bin/fetch", argv);
+            exit(127);
+        }
+        close(fds[1]);
+        sl->fd = fds[0];
+        sl->pid = pid;
+        sl->res = r;
+        sl->len = 0;
+        sl->cap = 16384;
+        sl->buf = malloc(sl->cap);
+        if (!sl->buf) {
+            kill(pid, 9);
+            close(fds[0]);
+            break;
+        }
+        p->res[r].state = RS_LOADING;
+    }
+    int left = res_left(p);
+    if (left)
+        snprintf(b->status, sizeof b->status, "Loading page resources (%d left)", left);
+    else if (!b->loading)
+        snprintf(b->status, sizeof b->status, "Done");
+}
+
+/* A sub-resource finished downloading. */
+static void finish_slot(struct browser *b, struct rslot *sl)
+{
+    struct page *p = &b->page;
+    struct res *r = &p->res[sl->res];
+    sl->buf[sl->len] = 0;
+    char *body = NULL;
+    int blen = 0, status = 0;
+    if (!strncmp(sl->buf, "STATUS ", 7)) {
+        status = atoi(sl->buf + 7);
+        char *sep = strstr(sl->buf, "\n\n");
+        if (sep) {
+            body = sep + 2;
+            blen = sl->len - (body - sl->buf);
+        }
+    }
+    r->state = RS_FAILED;
+    if (status == 200 && body && blen > 0) {
+        if (r->kind == R_CSS) {
+            r->css = malloc(blen + 1);
+            if (r->css) {
+                memcpy(r->css, body, blen);
+                r->css[blen] = 0;
+                r->css_len = blen;
+                r->state = RS_DONE;
+            }
+        } else {
+            r->img = img_decode((const u8 *)body, blen);
+            if (r->img)
+                r->state = RS_DONE;
+        }
+    }
+    free(sl->buf);
+    sl->buf = NULL;
+    close(sl->fd);
+    if (r->kind == R_CSS)
+        p->dirty_style = 1;
+    p->layout_w = 0;                                    /* sizes may have changed: lay out again */
+    pump(b);
+    wm_invalidate(b->win);
 }
 
 static void start_fetch(struct browser *b, const char *url)
@@ -344,22 +485,49 @@ static void finish_load(struct browser *b)
 done:
     free(b->rbuf);
     b->rbuf = NULL;
+    if (b->page.root)
+        pump(b);
 }
 
 /* ---------------- app callbacks ---------------- */
 
-static int br_pollfd(struct win *w, struct pollfd *p)
+static int br_pollfds(struct win *w, struct pollfd *p, int max)
 {
     struct browser *b = w->data;
-    if (!b->loading)
-        return 0;
-    *p = (struct pollfd){b->rfd, POLLIN, 0};
-    return 1;
+    int n = 0;
+    if (b->loading && n < max)
+        p[n++] = (struct pollfd){b->rfd, POLLIN, 0};
+    for (int i = 0; i < NSLOT; i++)
+        if (b->slot[i].buf && n < max)
+            p[n++] = (struct pollfd){b->slot[i].fd, POLLIN, 0};
+    return n;
 }
 
 static void br_fdready(struct win *w, struct pollfd *p)
 {
     struct browser *b = w->data;
+    for (int i = 0; i < NSLOT; i++) {
+        struct rslot *sl = &b->slot[i];
+        if (!sl->buf || sl->fd != p->fd)
+            continue;
+        if (sl->len + 8192 + 1 > sl->cap) {
+            if (sl->cap >= 8 * 1024 * 1024) {
+                sl->len = 0;
+                finish_slot(b, sl);
+                return;
+            }
+            char *nb = realloc(sl->buf, sl->cap * 2);
+            if (!nb) { sl->len = 0; finish_slot(b, sl); return; }
+            sl->buf = nb;
+            sl->cap *= 2;
+        }
+        int n = read(sl->fd, sl->buf + sl->len, 8192);
+        if (n > 0)
+            sl->len += n;
+        else
+            finish_slot(b, sl);
+        return;
+    }
     if (b->rlen + 8192 + 1 > b->rcap) {
         if (b->rcap >= MAX_PAGE) {
             stop_fetch(b);
@@ -433,8 +601,13 @@ static void br_draw(struct win *w, struct rect c)
 
     struct rect view = view_rect(c);
     gfx_fill(view.x, view.y, view.w, view.h, C_WHITE);
-    if (b->page.layout_w != view.w)
-        page_layout(&b->page, view.w);
+    struct page *pg = &b->page;
+    if (pg->root && (!pg->styled || (pg->dirty_style && !css_pending(pg)))) {
+        css_restyle(pg, view.w);
+        pg->layout_w = 0;
+    }
+    if (pg->layout_w != view.w)
+        page_layout(pg, view.w);
     int ms = max_scroll(b, view);
     if (b->scroll > ms) b->scroll = ms;
     if (b->scroll < 0) b->scroll = 0;
@@ -442,7 +615,7 @@ static void br_draw(struct win *w, struct rect c)
     struct rect clip = rect_isect(saved, view);
     if (clip.w > 0) {
         gfx_set_clip(clip.x, clip.y, clip.w, clip.h);
-        if (b->loading && !b->page.nitems)
+        if (b->loading && !b->page.root)
             gfx_text(view.x + 16, view.y + 16, "Loading...", C_TEXT_DIM);
         page_draw(&b->page, view, b->scroll, b->hover);
         gfx_set_clip(saved.x, saved.y, saved.w, saved.h);
@@ -653,7 +826,7 @@ static void br_close(struct win *w)
 }
 
 static const struct app browser_app = {.draw = br_draw, .key = br_key, .mouse = br_mouse, .wheel = br_wheel,
-                                       .tick = br_tick, .pollfd = br_pollfd, .fdready = br_fdready,
+                                       .tick = br_tick, .pollfds = br_pollfds, .fdready = br_fdready,
                                        .close = br_close};
 
 void browser_open(const char *url)

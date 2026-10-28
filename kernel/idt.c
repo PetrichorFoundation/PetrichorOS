@@ -73,6 +73,18 @@ static const char *exc_names[20] = {
 static void exception(struct regs *r)
 {
     const char *name = r->int_no < 20 ? exc_names[r->int_no] : "unknown exception";
+    if ((r->cs & 3) == 3 && r->int_no == 14) {                  /* the stack grows downwards on demand */
+        u32 lo = USER_TOP - USER_STACK_MAX * PAGE_SIZE, hi = USER_TOP - USER_STACK_PAGES * PAGE_SIZE;
+        u32 a = read_cr2() & ~0xFFFu;
+        if (a >= lo && a < hi) {
+            u32 va;
+            for (va = a; va < hi; va += PAGE_SIZE)
+                if (vmm_alloc_page(cur->pd, va) < 0)
+                    break;
+            if (va >= hi)
+                return;
+        }
+    }
     if ((r->cs & 3) == 3) {
         kprintf("[pid %d %s] killed: %s at eip=%p", cur->pid, cur->name, name, r->eip);
         if (r->int_no == 14)
