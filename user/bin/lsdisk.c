@@ -2,8 +2,8 @@
 
 int main(void)
 {
-    struct driveinfo d[4];
-    int n = drives(d, 4);
+    struct driveinfo d[MAXDRIVES];
+    int n = drives(d, MAXDRIVES);
     printf("NAME  SIZE        MODEL\n");
     for (int i = 0; i < n; i++)
         printf("%-5s %6u MiB  %s%s\n", d[i].name, d[i].sectors / 2048, d[i].model, d[i].boot ? "  (boot disk)" : "");

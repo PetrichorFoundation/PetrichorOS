@@ -45,8 +45,8 @@ msg:        .asciz "Petrichor: "
 err:        .asciz "disk error"
 boot_drive: .byte 0
 
-.align 4
-dap:
+.org 0x1A0                          # fixed place so tools/mkiso can patch it for CD boot:
+dap:                                # count at 0x1A2, starting LBA at 0x1A8
     .byte 16, 0
     .word 15                        # sectors
     .word 0x7E00, 0x0000            # destination offset:segment

@@ -1,6 +1,7 @@
 #include "kernel.h"
 
 extern const u8 _initrd_start[], _initrd_end[];
+struct bootinfo bootinfo;
 
 static void banner(void)
 {
@@ -28,6 +29,19 @@ void kmain(u32 magic, u32 *mbi)
             kb = 512 * 1024;
     }
 
+    if ((mbi[0] & 8) && mbi[5] >= 1 && mbi[6]) {      /* flags bit 3: modules (the pristine kernel copy) */
+        const u32 *mod = (const u32 *)mbi[6];
+        bootinfo.kimg = mod[0];
+        bootinfo.kimg_size = mod[1] - mod[0];
+    }
+    if ((mbi[0] & 0x1000) && ((const u8 *)mbi)[109] == 1) {   /* flags bit 12: framebuffer (direct RGB) */
+        bootinfo.fb_addr = mbi[22];
+        bootinfo.fb_pitch = mbi[24];
+        bootinfo.fb_w = mbi[25];
+        bootinfo.fb_h = mbi[26];
+        bootinfo.fb_bpp = ((const u8 *)mbi)[108];
+    }
+
     static char cmdline[128];
     if ((mbi[0] & 4) && mbi[4]) {                   /* flags bit 2: a command line from the loader */
         const char *src = (const char *)mbi[4];
@@ -42,8 +56,9 @@ void kmain(u32 magic, u32 *mbi)
     gdt_init();
     idt_init();
     mem_init(kb * 1024);
-    int ndisks = ata_init();
-    kprintf("[ata ] %d disk%s\n", ndisks, ndisks == 1 ? "" : "s");
+    if (bootinfo.fb_addr && bootinfo.fb_bpp == 32)
+        console_use_fb();                       /* VGA text mode is gone: draw text on the framebuffer */
+    storage_init();
     fs_init();
     initrd_load(_initrd_start, _initrd_end - _initrd_start);
     {

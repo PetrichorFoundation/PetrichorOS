@@ -28,7 +28,8 @@
 #define DEV_RANDOM  4
 #define DEV_INPUT   5
 #define DEV_DISK    6   /* raw disk; minor = drive index */
-#define NDRIVES     4
+#define DEV_KIMG    7   /* read-only: the kernel image exactly as it was loaded from the boot medium */
+#define NBLK        8   /* block devices (disks) */
 
 /* Register snapshot built by isr_common (see isr.S). */
 struct regs {
@@ -121,10 +122,20 @@ extern struct proc *cur;
 extern volatile u32 ticks;
 extern int tty_fg_pgrp;
 
+/* What the bootloader told us (main.c). */
+struct bootinfo {
+    u32 kimg, kimg_size;                         /* pristine copy of the boot image kernel, for the installer */
+    u32 fb_addr, fb_pitch, fb_w, fb_h, fb_bpp;   /* VESA linear framebuffer, if the bootloader set one up */
+};
+extern struct bootinfo bootinfo;
+
 /* console.c */
 void console_init(void);
 void console_putc(char c);
 void console_write(const char *s, u32 n);
+void console_use_fb(void);                       /* switch to the framebuffer text console (after mem_init) */
+void console_suspend(void);                      /* a graphical session owns the screen */
+void console_resume(void);
 void serial_irq_enable(void);
 void serial_irq(void);
 int kprintf(const char *fmt, ...);
@@ -181,13 +192,35 @@ u32 inode_nents(struct inode *ip);
 u32 inode_size(struct inode *ip);                    /* bytes (entries for a directory) */
 int inode_dirent(struct inode *ip, u32 idx, struct dirent *de);
 
-/* ata.c */
-int ata_init(void);
-int ata_present(int dev);
-u32 ata_sectors(int dev);
-const char *ata_model(int dev);
-int ata_read(int dev, u32 lba, u32 n, void *buf);
-int ata_write(int dev, u32 lba, u32 n, const void *buf);
+/* blk.c: block devices.  Drivers register disks; everything else uses indexes. */
+#define BUS_IDE  0
+#define BUS_SATA 1
+#define BUS_NVME 2
+typedef int (*blk_rw_fn)(void *priv, u32 lba, u32 n, void *buf, int write);
+int storage_init(void);                          /* probe IDE, AHCI, NVMe; find the boot disk */
+int blk_register(const char *model, u32 sectors, int bus, blk_rw_fn rw, void *priv);
+int blk_present(int dev);
+u32 blk_sectors(int dev);                        /* 512-byte sectors */
+const char *blk_model(int dev);
+const char *blk_name(int dev);                   /* "hda".. */
+int blk_bus(int dev);
+int blk_read(int dev, u32 lba, u32 n, void *buf);
+int blk_write(int dev, u32 lba, u32 n, const void *buf);
+extern int boot_disk;                            /* index of the disk we booted from, or -1 */
+int ide_probe(void);
+int ahci_probe(void);
+int nvme_probe(void);
+
+/* PCI (pci.c) and device memory (mem.c) */
+struct pcidev {
+    u32 bus, slot, fn;
+};
+int pci_find_class(u32 class24, int index, struct pcidev *out);   /* class<<16 | subclass<<8 | progif */
+u32 pci_cfg_read(const struct pcidev *d, u32 off);
+void pci_cfg_write(const struct pcidev *d, u32 off, u32 v);
+void pci_enable(const struct pcidev *d);                         /* memory space + bus mastering */
+void *mmio_map(u32 phys, u32 size);                              /* uncached kernel mapping of device memory */
+void *kalloc_aligned(u32 size, u32 align);                       /* physically contiguous (identity-mapped heap) */
 
 /* pfs.c: on-disk filesystem */
 int pfs_mount(struct inode *mountpoint);
@@ -283,6 +316,9 @@ void idle_loop(void) __attribute__((noreturn));
 
 /* exec.c */
 int exec_into(struct proc *p, struct inode *ip, int argc, char **argv);
+
+/* acpi.c */
+void acpi_poweroff(void);
 
 /* syscall.c */
 int syscall_dispatch(struct regs *r);

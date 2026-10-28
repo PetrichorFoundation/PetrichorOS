@@ -34,20 +34,6 @@ static u8 tx_buf[4][1536] __attribute__((aligned(4)));
 static int tx_cur;
 static int tx_used[4];
 
-/* ---------------- PCI configuration space ---------------- */
-
-u32 pci_read(u32 bus, u32 slot, u32 fn, u32 off)
-{
-    outl(0xCF8, 0x80000000u | bus << 16 | slot << 11 | fn << 8 | (off & 0xFC));
-    return inl(0xCFC);
-}
-
-void pci_write(u32 bus, u32 slot, u32 fn, u32 off, u32 v)
-{
-    outl(0xCF8, 0x80000000u | bus << 16 | slot << 11 | fn << 8 | (off & 0xFC));
-    outl(0xCFC, v);
-}
-
 int nic_init(void)
 {
     u32 slot;

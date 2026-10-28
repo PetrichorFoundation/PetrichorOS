@@ -26,7 +26,11 @@ desktop by itself. Choose "text console" in the menu, or "Exit to Console" in th
 for a shell. In a shell try `help`, `ls /bin`, `selftest`, `df`, `lsdisk`, `ifconfig`,
 `ping 10.0.2.2`, `nslookup example.com`; `pdesk` starts the desktop and `halt` powers off.
 
-**Installing.** The installer copies Petrichor to a second disk:
+**ISO and USB.** `make iso` builds `build/petrichor.iso`: a bootable CD image that is also a bootable
+USB image (see "Putting it on a real PC" below). `make run-iso` boots it in QEMU with a blank disk to
+install onto. The ISO runs live (nothing is saved) and can install Petrichor onto a disk.
+
+**Installing.** The installer copies Petrichor to a disk. In QEMU:
 
 ```sh
 make run-installer        # boots the installer medium with a blank second disk attached
@@ -34,9 +38,41 @@ make run-installer        # boots the installer medium with a blank second disk 
 make run-installed        # boots the disk the installer wrote, with no installer medium
 ```
 
-`pinstall` is the engine behind the wizard and also works from a shell (`pinstall`, or
-`pinstall -y hdb`). It refuses to touch the disk it is running from, verifies the copy byte for byte,
-and leaves the data partition to be formatted on the new disk's first boot.
+`pinstall` is the engine behind the wizard and also works from a shell (`pinstall`,
+`pinstall --probe hdb`, or `pinstall -y hdb`). It works from any boot medium (CD, USB, disk), builds
+the image from the bootloader files shipped in the system plus the pristine kernel the bootloader
+kept in RAM, refuses to touch the disk it is running from, verifies the copy byte for byte, and leaves
+the data partition to be formatted on the new disk's first boot. The wizard shows what is already on
+each disk (partition tables) and needs an explicit "I understand" tick before it erases anything.
+
+## Putting it on a real PC
+
+I could only test this in QEMU. Real PCs vary a lot, so try it in a virtual machine first, and treat the
+first real boot as an experiment on a machine you can afford to wipe. What Petrichor needs:
+
+| Needs | Details |
+| --- | --- |
+| BIOS boot | Legacy/CSM/"BIOS" boot mode. There is no UEFI loader, so a UEFI-only machine won't boot it. |
+| Keyboard and mouse | PS/2, or USB with the firmware's "legacy USB support" (it emulates PS/2). There are no USB drivers; USB mice often aren't emulated, so the desktop may have a keyboard but no pointer. |
+| Disk | SATA in **AHCI** mode, **NVMe**, or legacy IDE. RAID/"Intel RST" mode, USB drives and SD cards aren't supported. |
+| Display | A 1024x768 32-bit VESA mode from the BIOS (most have one). Otherwise you get the text console only. |
+| Network | Only the RTL8139 (rare on real PCs), so expect no network. |
+
+To write the ISO to a USB stick on macOS (double-check the disk number: this overwrites the whole stick):
+
+```sh
+diskutil list                       # find the stick, e.g. /dev/disk4
+diskutil unmountDisk /dev/disk4
+sudo dd if=build/petrichor.iso of=/dev/rdisk4 bs=1m
+diskutil eject /dev/disk4
+```
+
+Boot from the stick (usually F12/F10/Esc for the boot menu, choosing the entry marked "Legacy" or
+"BIOS"), pick **Petrichor**, and double-click **Install** on the desktop. The installer lists the
+internal disks it can see; installing **erases the partition table of the disk you pick**, so it is
+not a dual-boot installer. Remove the stick and boot from the disk. The ISO also works as a CD in
+QEMU/VirtualBox/VMware. If you boot the stick and it shows no disks, the machine's storage mode
+isn't one of the supported ones.
 
 **Package manager demo.** In one terminal on the host run `make serve-repo` (serves `build/repo` on
 port 8080), then inside Petrichor: `ppm update`, `ppm search`, `ppm install lolcow`, `lolcow`.
@@ -53,6 +89,12 @@ kernel above 1 MiB in 32 KiB chunks (INT 15h/87h), switches to 32-bit protected 
 kernel using the Multiboot register convention, passing the chosen entry as a kernel command line.
 `tools/mkdisk` lays it all out on the disk image.
 
+**Graphics at boot.** For the default and "graphical desktop" menu entries the bootloader asks the BIOS
+(VESA VBE) for a 1024x768 32-bit linear framebuffer before starting the kernel and passes its
+address in the Multiboot info. The kernel then draws its text console on that framebuffer (so boot
+messages and the shell work without VGA text mode) and hands the same framebuffer to the desktop.
+Under QEMU's own VGA the older Bochs interface is still used if no VESA mode was set.
+
 **Boot flow.** The kernel exposes the command line as `/etc/cmdline` (`mode=text`, `mode=desktop`,
 `nodisk`). `init` reads it, falling back to `autostart=` in `/disk/etc/petrichor.conf` (set in
 Settings) and then to the desktop. If the desktop can't start or keeps crashing, `init` falls back
@@ -68,7 +110,8 @@ to the desktop when it exits.
 | Memory | Physical frame bitmap, first-fit kernel heap, 2-level paging, per-process address spaces, shared device-memory mappings |
 | Processes | `fork`, `exec` (ELF32 and `#!` scripts), `wait`, `exit`, `kill`, process groups, preemptive round-robin scheduler for user code, sleep/wakeup with timeouts, `poll` |
 | Filesystems | A RAM filesystem for `/` (unpacked from an initrd) and **PFS**, an on-disk filesystem mounted at `/disk` (below) |
-| Disk | ATA PIO driver for up to four drives (LBA28), raw `/dev/hda`..`hdd` block devices, 64-block write-through buffer cache |
+| Disk | A block-device layer with three drivers: legacy IDE (PIO), **AHCI/SATA** (DMA) and **NVMe**; raw `/dev/hda`.. block devices; the boot disk is identified by content, so any bus works; 64-block write-through buffer cache |
+| Power | ACPI soft-off (RSDP/RSDT/FADT/DSDT `_S5_`), keyboard-controller reset |
 | Network | PCI scan, RTL8139 driver, ARP, IPv4, ICMP, UDP, TCP client (below) |
 | Graphics and input | Bochs/QEMU VBE linear framebuffer (1024x768x32), raw keyboard events (arrows, F-keys, modifiers), PS/2 mouse with scroll wheel, `/dev/input` event stream, CMOS real-time clock |
 | I/O | Pipes, sockets, VGA text console with ANSI colors, 16550 serial, PS/2 keyboard, a cooked tty with line editing, `^C`, `^D` |
@@ -154,20 +197,21 @@ QEMU's monitor (injected mouse/keys plus screenshots), a two-disk setup, and a h
 
 ## Limits and ideas
 
-Single CPU, no SMP. The kernel is 32-bit with at most 512 MiB of RAM. The root filesystem isn't
-persistent, PFS has no journal and caps files at ~4 MiB, and the ATA driver is polled PIO (no
-DMA, no SATA/AHCI, no partition table). The installer needs a second disk and copies the whole
-boot region; there is no partitioning, no choice of what to install, and no boot loader chaining
-to other operating systems. It is BIOS-only (no UEFI), so it targets QEMU/BIOS machines rather than
-modern real hardware. The network stack has no DHCP (static QEMU addresses), IP fragmentation, TCP
-listen/accept, or window-based flow control; only the RTL8139 is supported. Graphics use the
-Bochs/QEMU VBE interface only, so there is no real-GPU support and the desktop runs in a single
-process (apps are built in rather than separate clients talking to a window server). Terminal
-lines don't reflow when a window is resized. `ppm` has no package signatures beyond SHA-256 in
-the index, and the repository is plain HTTP. There are no real signals (`kill` terminates) and no
-copy-on-write `fork`. The bitmap font is the standard VGA text-mode font as rendered by QEMU's VGA
-BIOS (LGPL-licensed); swap in your own if you need different terms.
+Single CPU, no SMP. The kernel is 32-bit with at most 512 MiB of RAM, and disks over 2 TiB aren't
+addressed fully. The root filesystem isn't persistent and PFS has no journal and caps files at ~4 MiB.
+Disk drivers are polled (no interrupts), AHCI/NVMe use one queue and one command at a time, and NVMe
+needs 512-byte sectors. The installer copies the whole boot region and has no partitioning, no
+dual-boot support and no choice of what to install. Boot is BIOS-only (no UEFI), and there are no USB
+drivers (keyboard and mouse rely on firmware PS/2 emulation; USB sticks can boot it but can't be
+read once it is running). The network stack has no DHCP (static QEMU addresses), IP fragmentation,
+TCP listen/accept or window-based flow control, and only the RTL8139 is supported. The desktop needs a
+1024x768 32-bit VESA mode and runs in a single process (apps are built in rather than separate
+clients of a window server). Terminal lines don't reflow when a window is resized. `ppm` has no
+package signatures beyond SHA-256 in the index, and the repository is plain HTTP. There are no real
+signals (`kill` terminates) and no copy-on-write `fork`. The bitmap font is the standard VGA text-mode
+font as rendered by QEMU's VGA BIOS (LGPL-licensed); swap in your own if you need different terms.
 
-Natural next steps: a window-server protocol so separate programs can open windows, clipboard and
-text selection, a login screen, DHCP and `listen`/`accept`, an e1000 driver, DMA disk I/O, UEFI
-boot, partitioning in the installer, a journal, signed packages, real signals, a 64-bit port.
+Natural next steps: UEFI boot (and GPT), USB (xHCI) keyboard/mouse/storage drivers, more NICs (e1000,
+RTL8168), AHCI/NVMe interrupts and multiple queues, selectable display modes, partitioning and
+dual-boot in the installer, a window-server protocol, DHCP and `listen`/`accept`, a journal, signed
+packages, real signals, a 64-bit port.

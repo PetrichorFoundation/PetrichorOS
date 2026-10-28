@@ -145,16 +145,27 @@ static int disk_rw(struct file *f, void *buf, u32 n, int write)
     n &= ~511u;
     if (!n)
         return -EINVAL;
-    u32 lba = f->off / 512, total = ata_sectors(dev);
+    u32 lba = f->off / 512, total = blk_sectors(dev);
     if (lba >= total)
         return 0;                               /* end of disk */
     if (n > 128 * 1024)
         n = 128 * 1024;
     if (lba + n / 512 > total)
         n = (total - lba) * 512;
-    int r = write ? ata_write(dev, lba, n / 512, buf) : ata_read(dev, lba, n / 512, buf);
+    int r = write ? blk_write(dev, lba, n / 512, buf) : blk_read(dev, lba, n / 512, buf);
     if (r < 0)
         return r;
+    f->off += n;
+    return n;
+}
+
+static int kimg_read(struct file *f, void *dst, u32 n)
+{
+    if (f->off >= bootinfo.kimg_size)
+        return 0;
+    if (n > bootinfo.kimg_size - f->off)
+        n = bootinfo.kimg_size - f->off;
+    memcpy(dst, (const void *)(bootinfo.kimg + f->off), n);
     f->off += n;
     return n;
 }
@@ -192,6 +203,8 @@ int file_read(struct file *f, void *dst, u32 n)
     case T_DEV:
         if (ip->major == DEV_DISK)
             return disk_rw(f, dst, n, 0);
+        if (ip->major == DEV_KIMG)
+            return kimg_read(f, dst, n);
         return dev_read(ip, dst, n);
     default: {
         int r = inode_read(ip, f->off, dst, n);
@@ -266,7 +279,8 @@ int file_readdir(struct file *f, struct dirent *de)
 int file_seek(struct file *f, int off, int whence)
 {
     if (f->type != FD_INODE ||
-        !(f->ip->type == T_FILE || (f->ip->type == T_DEV && f->ip->major == DEV_DISK)))
+        !(f->ip->type == T_FILE ||
+          (f->ip->type == T_DEV && (f->ip->major == DEV_DISK || f->ip->major == DEV_KIMG))))
         return -ESPIPE;
     int base;
     switch (whence) {

@@ -22,8 +22,30 @@ static u16 dispi_read(u16 idx)
     return inw(DISPI_DATA);
 }
 
+static int map_user_fb(u32 phys, u32 bytes)
+{
+    for (u32 off = 0; off < bytes; off += PAGE_SIZE)       /* uncached: the screen must see every write */
+        if (vmm_map(cur->pd, FB_USER_VA + off, phys + off, PTE_RW | PTE_US | PTE_SHARED | 0x18) < 0)
+            return -ENOMEM;
+    return 0;
+}
+
 int gfx_map(struct fbinfo *out, u32 w, u32 h)
 {
+    if (bootinfo.fb_addr && bootinfo.fb_bpp == 32) {          /* VESA mode set by our bootloader */
+        if (w != bootinfo.fb_w || h != bootinfo.fb_h)
+            return -EINVAL;
+        int e = map_user_fb(bootinfo.fb_addr, bootinfo.fb_pitch * bootinfo.fb_h);
+        if (e < 0)
+            return e;
+        console_suspend();
+        gfx_owner = cur->pid;
+        out->addr = FB_USER_VA;
+        out->width = bootinfo.fb_w;
+        out->height = bootinfo.fb_h;
+        out->pitch = bootinfo.fb_pitch;
+        return 0;
+    }
     if (w < 320 || h < 200 || w > 1920 || h > 1200)
         return -EINVAL;
     u32 slot;
@@ -60,6 +82,9 @@ void gfx_off(void)
 {
     if (gfx_owner < 0)
         return;
-    dispi_write(4, 0);
+    if (bootinfo.fb_addr)
+        console_resume();                                    /* redraw the text console */
+    else
+        dispi_write(4, 0);
     gfx_owner = -1;
 }

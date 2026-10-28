@@ -1231,8 +1231,8 @@ int main(void)
     }
     gfx_set_target(back, SCREEN_W, SCREEN_H);
     theme_load();
-    struct driveinfo di[4];
-    int nd = drives(di, 4);
+    struct driveinfo di[MAXDRIVES];
+    int nd = drives(di, MAXDRIVES);
     for (int i = 0; i < nd; i++)
         if (!di[i].boot && di[i].sectors >= 6144)
             installable = 1;

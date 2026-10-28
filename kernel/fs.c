@@ -115,7 +115,9 @@ u32 inode_size(struct inode *ip)
     if (ip->type == T_DIR)
         return inode_nents(ip);
     if (ip->type == T_DEV && ip->major == DEV_DISK)
-        return ata_sectors(ip->minor) * 512;
+        return blk_sectors(ip->minor) * 512;
+    if (ip->type == T_DEV && ip->major == DEV_KIMG)
+        return bootinfo.kimg_size;
     return ip->size;
 }
 
@@ -410,10 +412,12 @@ void fs_init(void)
     make_dev("/dev/zero", DEV_ZERO, 0);
     make_dev("/dev/random", DEV_RANDOM, 0);
     make_dev("/dev/input", DEV_INPUT, 0);
-    for (int i = 0; i < NDRIVES; i++) {                 /* raw disks: /dev/hda../dev/hdd */
-        if (ata_present(i)) {
-            char path[] = "/dev/hda";
-            path[7] = 'a' + i;
+    if (bootinfo.kimg)
+        make_dev("/dev/kernelimg", DEV_KIMG, 0);
+    for (int i = 0; i < NBLK; i++) {                    /* raw disks: /dev/hda, /dev/hdb, ... */
+        if (blk_present(i)) {
+            char path[16] = "/dev/";
+            strcat(path, blk_name(i));
             make_dev(path, DEV_DISK, i);
         }
     }

@@ -242,8 +242,8 @@ static void test_scripts_poll_clock(void)
 static void test_raw_disk(void)
 {
     printf("raw disks\n");
-    struct driveinfo d[4];
-    int n = drives(d, 4);
+    struct driveinfo d[MAXDRIVES];
+    int n = drives(d, MAXDRIVES);
     CHECK(n >= 1 && d[0].boot && d[0].name[0] == 'h' && d[0].sectors > 8192, "drives() reports the boot disk");
     if (n < 1)
         return;

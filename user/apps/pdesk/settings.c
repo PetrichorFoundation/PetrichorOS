@@ -112,10 +112,10 @@ static void st_draw(struct win *w, struct rect c)
     } else if (s->tab == TAB_SYSTEM) {
         struct meminfo mi;
         struct netinfo ni;
-        struct driveinfo di[4];
+        struct driveinfo di[MAXDRIVES];
         meminfo(&mi);
         netinfo(&ni);
-        int nd = drives(di, 4);
+        int nd = drives(di, MAXDRIVES);
         char t[96];
         u32 up = uptime() / 100;
         line(x, &y, "Petrichor", PETRICHOR_VERSION);

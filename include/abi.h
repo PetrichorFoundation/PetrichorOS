@@ -157,6 +157,7 @@
 #ifndef __ASSEMBLER__
 #include "types.h"
 
+#define MAXDRIVES 8
 #define NAME_MAX 27
 #define PATH_MAX 256
 
@@ -191,7 +192,7 @@ struct input_event {
 
 struct driveinfo {
     u32 sectors;                /* 512-byte sectors */
-    u8 index, boot, pad[2];     /* boot: the disk this system booted from and mounts as /disk */
+    u8 index, boot, bus, pad;   /* boot: the disk this system booted from and mounts as /disk; bus: 0 IDE, 1 SATA, 2 NVMe */
     char name[8];               /* "hda".. */
     char model[40];
 };

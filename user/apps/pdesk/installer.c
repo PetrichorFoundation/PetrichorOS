@@ -6,10 +6,12 @@ enum { PG_WELCOME, PG_DISK, PG_CONFIRM, PG_WORKING, PG_DONE, PG_ERROR };
 struct inst {
     struct win *win;
     int page;
-    struct driveinfo d[4];
+    struct driveinfo d[MAXDRIVES];
     int nd;
-    int cand[4], ncand;                 /* indexes into d[] of usable targets */
+    int cand[MAXDRIVES], ncand;                 /* indexes into d[] of usable targets */
     int sel;                            /* index into cand[] */
+    char note[MAXDRIVES][96];           /* what is already on each candidate disk */
+    int confirm;                        /* "I understand" checkbox */
     int rfd, pct;
     char status[96], error[120];
     char linebuf[160];
@@ -18,6 +20,33 @@ struct inst {
 
 #define BTN_Y(c) ((c).y + (c).h - 44)
 
+/* Describes existing partitions, so nobody erases another operating system by accident. */
+static void probe_note(const char *name, char *out, int outsz)
+{
+    char path[16];
+    snprintf(path, sizeof path, "/dev/%s", name);
+    out[0] = 0;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return;
+    unsigned char b[1024];
+    int got = 0, r;
+    while (got < (int)sizeof b && (r = read(fd, b + got, sizeof b - got)) > 0)
+        got += r;
+    close(fd);
+    if (got < (int)sizeof b)
+        return;
+    if (!memcmp(b + 512, "EFI PART", 8)) {
+        safestrcpy(out, "Has a GPT partition table: another OS may be installed", outsz);
+    } else if (b[510] == 0x55 && b[511] == 0xAA) {
+        int parts = 0;
+        for (int i = 0; i < 4; i++)
+            parts += b[446 + i * 16 + 4] != 0;
+        if (parts)
+            snprintf(out, outsz, "Has %d partition%s: another OS may be installed", parts, parts == 1 ? "" : "s");
+    }
+}
+
 static void scan(struct inst *s)
 {
     s->nd = drives(s->d, 4);
@@ -25,6 +54,8 @@ static void scan(struct inst *s)
     for (int i = 0; i < s->nd; i++)
         if (!s->d[i].boot && s->d[i].sectors >= 6144)
             s->cand[s->ncand++] = i;
+    for (int i = 0; i < s->ncand; i++)
+        probe_note(s->d[s->cand[i]].name, s->note[i], sizeof s->note[i]);
     if (s->sel >= s->ncand)
         s->sel = 0;
 }
@@ -138,13 +169,16 @@ static void in_draw(struct win *w, struct rect c)
             for (int i = 0; i < s->ncand; i++) {
                 const struct driveinfo *d = &s->d[s->cand[i]];
                 if (i == s->sel)
-                    gfx_fill(x - 6, y - 4, c.w - 36, 30, g_accent);
+                    gfx_fill(x - 6, y - 4, c.w - 36, 44, g_accent);
                 gfx_frame(x, y + 2, 14, 14, i == s->sel ? C_WHITE : RGB(0x60, 0x68, 0x70));
                 if (i == s->sel) gfx_fill(x + 4, y + 6, 6, 6, C_WHITE);
                 char t[96];
-                snprintf(t, sizeof t, "%s   %u MiB   %s", d->name, d->sectors / 2048, d->model);
+                static const char *const bus[] = {"IDE", "SATA", "NVMe"};
+                snprintf(t, sizeof t, "%s  %s  %u MiB  %s", d->name, bus[d->bus < 3 ? d->bus : 0], d->sectors / 2048, d->model);
                 gfx_text(x + 26, y + 2, t, i == s->sel ? C_WHITE : C_TEXT);
-                y += 34;
+                if (s->note[i][0])
+                    gfx_text(x + 26, y + 20, s->note[i], i == s->sel ? RGB(0xff, 0xe0, 0xa0) : RGB(0xc0, 0x40, 0x30));
+                y += 50;
             }
         }
         ui_button(c.x + 20, by, 90, 28, "< Back", 0);
@@ -156,10 +190,21 @@ static void in_draw(struct win *w, struct rect c)
         char t[96];
         snprintf(t, sizeof t, "Everything on %s (%u MiB, %s)", d->name, d->sectors / 2048, d->model);
         gfx_text(x, y, t, RGB(0xc0, 0x40, 0x30)); y += 20;
-        gfx_text(x, y, "will be erased.", RGB(0xc0, 0x40, 0x30)); y += 36;
+        gfx_text(x, y, "will be erased.", RGB(0xc0, 0x40, 0x30)); y += 24;
+        if (s->note[s->sel][0]) {
+            gfx_text(x, y, s->note[s->sel], RGB(0xc0, 0x40, 0x30));
+            y += 20;
+        }
+        y += 8;
         gfx_text(x, y, "The copy is verified when it is finished.", C_TEXT);
+        int cy2 = by - 34;
+        gfx_frame(x, cy2, 16, 16, RGB(0x50, 0x58, 0x60));
+        gfx_fill(x + 1, cy2 + 1, 14, 14, C_WHITE);
+        if (s->confirm)
+            gfx_fill(x + 3, cy2 + 3, 10, 10, g_accent);
+        gfx_text(x + 26, cy2, "I understand that everything on this disk will be erased", C_TEXT);
         ui_button(c.x + 20, by, 90, 28, "< Back", 0);
-        ui_button(c.x + c.w - 130, by, 110, 28, "Install", 0);
+        ui_button(c.x + c.w - 130, by, 110, 28, "Install", !s->confirm);
         break;
     }
     case PG_WORKING:
@@ -205,17 +250,25 @@ static void in_mouse(struct win *w, int x, int y, int kind)
         break;
     case PG_DISK:
         if (prev) s->page = PG_WELCOME;
-        else if (next && s->ncand) s->page = PG_CONFIRM;
+        else if (next && s->ncand) { s->page = PG_CONFIRM; s->confirm = 0; }
         else if (s->ncand) {
-            int i = (y - 104 + 4) / 34;
-            if (y >= 100 && i >= 0 && i < s->ncand)
+            int i = (y - 100) / 50;
+            if (y >= 100 && i >= 0 && i < s->ncand) {
                 s->sel = i;
+                s->confirm = 0;
+            }
         }
         break;
-    case PG_CONFIRM:
-        if (prev) s->page = PG_DISK;
-        else if (next) begin(s);
+    case PG_CONFIRM: {
+        int box = y >= by - 38 && y < by - 14 && x >= 20 && x < c.w - 20;
+        if (box)
+            s->confirm = !s->confirm;
+        else if (prev)
+            s->page = PG_DISK;
+        else if (next && s->confirm)
+            begin(s);
         break;
+    }
     case PG_DONE:
         if (prev) { wm_close(w); return; }
         if (next) shutdown(SHUT_POWEROFF);
@@ -244,7 +297,7 @@ void installer_open(void)
     if (!s)
         return;
     scan(s);
-    s->win = wm_open(&inst_app, 520, 320, "Install Petrichor", s);
+    s->win = wm_open(&inst_app, 560, 360, "Install Petrichor", s);
     if (!s->win) {
         free(s);
         return;

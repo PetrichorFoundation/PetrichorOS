@@ -14,7 +14,7 @@ struct drive {
     char model[41];
 };
 
-static struct drive drv[NDRIVES] = {
+static struct drive drv[4] = {
     {.io = 0x1F0, .ctrl = 0x3F6}, {.io = 0x1F0, .ctrl = 0x3F6, .slave = 1},
     {.io = 0x170, .ctrl = 0x376}, {.io = 0x170, .ctrl = 0x376, .slave = 1},
 };
@@ -79,26 +79,9 @@ static int identify(struct drive *d)
     return d->sectors ? 0 : -1;
 }
 
-/* Probes all four slots; returns how many disks answered. */
-int ata_init(void)
+static int ide_rw(void *priv, u32 lba, u32 n, void *buf, int write)
 {
-    int n = 0;
-    for (int i = 0; i < NDRIVES; i++) {
-        drv[i].present = identify(&drv[i]) == 0;
-        n += drv[i].present;
-    }
-    return n;
-}
-
-int ata_present(int dev) { return dev >= 0 && dev < NDRIVES && drv[dev].present; }
-u32 ata_sectors(int dev) { return ata_present(dev) ? drv[dev].sectors : 0; }
-const char *ata_model(int dev) { return ata_present(dev) ? drv[dev].model : ""; }
-
-static int ata_rw(int dev, u32 lba, u32 n, void *buf, int write)
-{
-    if (!ata_present(dev) || lba + n > drv[dev].sectors)
-        return -EIO;
-    struct drive *d = &drv[dev];
+    struct drive *d = priv;
     u8 *p = buf;
     for (u32 i = 0; i < n; i++, lba++, p += 512) {
         outb(d->io + 6, 0xE0 | (d->slave << 4) | ((lba >> 24) & 0x0F));
@@ -122,12 +105,14 @@ static int ata_rw(int dev, u32 lba, u32 n, void *buf, int write)
     return 0;
 }
 
-int ata_read(int dev, u32 lba, u32 n, void *buf)
+/* Probes the four legacy slots; registers each disk that answers. */
+int ide_probe(void)
 {
-    return ata_rw(dev, lba, n, buf, 0);
-}
-
-int ata_write(int dev, u32 lba, u32 n, const void *buf)
-{
-    return ata_rw(dev, lba, n, (void *)buf, 1);
+    int n = 0;
+    for (int i = 0; i < 4; i++) {
+        drv[i].present = identify(&drv[i]) == 0;
+        if (drv[i].present && blk_register(drv[i].model, drv[i].sectors, BUS_IDE, ide_rw, &drv[i]) >= 0)
+            n++;
+    }
+    return n;
 }

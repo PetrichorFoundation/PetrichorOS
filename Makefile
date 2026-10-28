@@ -10,7 +10,7 @@ TARGET := -target i686-unknown-none-elf
 COMMON := $(TARGET) -ffreestanding -fno-pic -fno-pie -fno-stack-protector \
           -mno-sse -mno-mmx -nostdlibinc -O2 -Wall -Wextra -Wno-unused-parameter \
           -std=gnu11 -Iinclude -MMD -MP
-KCFLAGS := $(COMMON) -Ikernel
+KCFLAGS := $(COMMON) -Ikernel -Ilib
 UCFLAGS := $(COMMON) -Iuser/lib -Ilib
 ASFLAGS := $(TARGET) -Iinclude -I$B
 LDFLAGS := -m elf_i386 -z max-page-size=4096 -z noexecstack
@@ -37,8 +37,8 @@ $(foreach a,$(UAPPS),$(eval $(call APP_RULE,$(a))))
 UEXE += $(addprefix $B/user/out/,$(UAPPS))
 
 .DEFAULT_GOAL := all
-.PHONY: all run run-multiboot run-nographic run-installer run-installed clean-target clean
-all: $B/petrichor.elf $B/disk.img $B/repo/index
+.PHONY: all iso run run-multiboot run-nographic run-iso run-installer run-installed clean-target clean
+all: $B/petrichor.elf $B/disk.img $B/petrichor.iso $B/repo/index
 
 $B/petrichor.elf: $(KOBJ) kernel/kernel.ld
 	$(LD) $(LDFLAGS) -T kernel/kernel.ld -o $@ $(KOBJ)
@@ -104,6 +104,16 @@ $B/mkdisk: tools/mkdisk.c
 	@mkdir -p $B
 	$(HOSTCC) -O2 -o $@ $<
 
+# The installer/live ISO: El Torito CD boot, and also a bootable USB image (dd it to a stick).
+$B/mkiso: tools/mkiso.c
+	@mkdir -p $B
+	$(HOSTCC) -O2 -o $@ $<
+
+$B/petrichor.iso: $B/mkiso $B/boot/stage1.bin $B/boot/stage2.bin $B/kernel.bin
+	$B/mkiso $B/boot/stage1.bin $B/boot/stage2.bin $B/kernel.bin $@
+
+iso: $B/petrichor.iso
+
 # Updates boot code + kernel in place; the data partition is left alone.
 $B/disk.img: $B/mkdisk $B/boot/stage1.bin $B/boot/stage2.bin $B/kernel.bin
 	$B/mkdisk $B/boot/stage1.bin $B/boot/stage2.bin $B/kernel.bin $@
@@ -115,10 +125,12 @@ $B/mkinitrd: tools/mkinitrd.c
 
 ROOTFILES := $(shell find rootfs -type f 2>/dev/null)
 
-$B/initrd.img: $B/mkinitrd $(UEXE) $(ROOTFILES)
+$B/initrd.img: $B/mkinitrd $(UEXE) $(ROOTFILES) $B/boot/stage1.bin $B/boot/stage2.bin
 	rm -rf $B/root
 	mkdir -p $B/root/bin $B/root/dev $B/root/tmp $B/root/home $B/root/root
 	cp -R rootfs/. $B/root/
+	mkdir -p $B/root/boot
+	cp $B/boot/stage1.bin $B/boot/stage2.bin $B/root/boot/
 	cp $(UEXE) $B/root/bin/
 	$B/mkinitrd $@ $B/root
 
@@ -132,6 +144,10 @@ $B/target.img:
 
 run: all
 	$(QEMU) $(QEMUFLAGS) -serial stdio
+
+# Boot the ISO as a CD with a blank disk attached: pick "Install Petrichor" on the desktop.
+run-iso: iso $B/target.img
+	$(QEMU) -m 128 -no-reboot -boot d -cdrom $B/petrichor.iso -drive file=$B/target.img,format=raw,if=ide,index=0 -nic user,model=rtl8139 -serial stdio
 
 # Boot the installer medium with a blank second disk, then run "Install Petrichor" on the desktop.
 run-installer: all $B/target.img

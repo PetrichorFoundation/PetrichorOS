@@ -7,6 +7,7 @@
 #include "kernel.h"
 
 extern char _end[];
+static void mmio_init(void);
 
 #define MAX_RAM (512u * 1024 * 1024)
 
@@ -148,9 +149,11 @@ u32 *vmm_new_pd(void)
     u32 *pd = (u32 *)pmm_alloc();
     if (!pd)
         return NULL;
-    /* Share the kernel's identity-mapped page tables. */
-    for (int i = 0; i < 256; i++)
-        pd[i] = kernel_pd[i];
+    /* Share the kernel's page tables: identity-mapped RAM below the user range, and the
+     * device-memory window above it. */
+    for (int i = 0; i < 1024; i++)
+        if (i < 256 || i >= 768)
+            pd[i] = kernel_pd[i];
     return pd;
 }
 
@@ -312,6 +315,12 @@ void mem_init(u32 ram_bytes)
     if (heap_size < (8u << 20)) heap_size = 8u << 20;
     if (heap_size > (96u << 20)) heap_size = 96u << 20;
     u32 heap_start = ((u32)_end + 4095) & ~4095u;
+    u32 low_free_start = 0, low_free_end = 0;
+    if (bootinfo.kimg && bootinfo.kimg + bootinfo.kimg_size > heap_start) {
+        low_free_start = heap_start;                          /* the gap before the kernel copy is ordinary RAM */
+        low_free_end = bootinfo.kimg & ~4095u;
+        heap_start = (bootinfo.kimg + bootinfo.kimg_size + 4095) & ~4095u;
+    }
     u32 heap_end = (heap_start + heap_size) & ~4095u;
     if (heap_end > ram_bytes)
         panic("not enough RAM (%u MiB)", ram_bytes >> 20);
@@ -323,7 +332,11 @@ void mem_init(u32 ram_bytes)
         frame_clear(f);
         nfree++;
     }
-    hint = heap_end / PAGE_SIZE;
+    for (u32 f = low_free_start / PAGE_SIZE; f < low_free_end / PAGE_SIZE; f++) {
+        frame_clear(f);
+        nfree++;
+    }
+    hint = low_free_start ? low_free_start / PAGE_SIZE : heap_end / PAGE_SIZE;
 
     /* Identity-map all RAM, supervisor only, in 4 KiB pages. */
     kernel_pd = (u32 *)pmm_alloc();
@@ -336,6 +349,7 @@ void mem_init(u32 ram_bytes)
             pt[j] = ((i << 22) | (j << 12)) | PTE_P | PTE_RW;
         kernel_pd[i] = (u32)pt | PTE_P | PTE_RW;
     }
+    mmio_init();
     __asm__ volatile(
         "mov %0, %%cr3\n"
         "mov %%cr0, %%eax\n"
@@ -345,4 +359,43 @@ void mem_init(u32 ram_bytes)
 
     kprintf("[mem ] %u MiB RAM, %u MiB kernel heap, paging on\n",
             ram_bytes >> 20, (heap_end - heap_start) >> 20);
+}
+
+/* Device memory (PCI BARs, framebuffers) lives above 3 GiB in a window shared by all processes. */
+#define MMIO_BASE 0xD0000000u
+#define MMIO_SIZE (64u << 20)
+static u32 mmio_next = MMIO_BASE;
+
+/* Every address space copies the kernel's top-level table when it is created, so a page table
+ * added to it later would be invisible to existing processes.  Create the window's tables up front. */
+static void mmio_init(void)
+{
+    for (u32 va = MMIO_BASE; va < MMIO_BASE + MMIO_SIZE; va += 4u << 20) {
+        u32 pt = pmm_alloc();
+        if (!pt)
+            panic("out of memory for the device-memory window");
+        kernel_pd[va >> 22] = pt | PTE_P | PTE_RW;
+    }
+}
+
+void *mmio_map(u32 phys, u32 size)
+{
+    u32 off = phys & 0xFFF, base = phys & ~0xFFFu;
+    u32 pages = (off + size + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (mmio_next + pages * PAGE_SIZE > MMIO_BASE + MMIO_SIZE)
+        return NULL;
+    u32 va = mmio_next;
+    mmio_next += pages * PAGE_SIZE;
+    for (u32 i = 0; i < pages; i++) {
+        u32 v = va + i * PAGE_SIZE, di = v >> 22;
+        ((u32 *)(kernel_pd[di] & ~0xFFFu))[(v >> 12) & 0x3FF] = (base + i * PAGE_SIZE) | PTE_P | PTE_RW | 0x18;  /* PCD|PWT */
+        __asm__ volatile("invlpg (%0)" : : "r"(v) : "memory");
+    }
+    return (void *)(va + off);
+}
+
+void *kalloc_aligned(u32 size, u32 align)
+{
+    u8 *p = kzalloc(size + align);
+    return p ? (void *)(((u32)p + align - 1) & ~(align - 1)) : NULL;
 }

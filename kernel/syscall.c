@@ -279,7 +279,8 @@ static int sys_shutdown(int mode)
     if (mode == SHUT_REBOOT) {
         outb(0x64, 0xFE);                       /* pulse the CPU reset line */
     } else {
-        outw(0x604, 0x2000);                    /* QEMU */
+        acpi_poweroff();                        /* real hardware (and QEMU): ACPI soft-off */
+        outw(0x604, 0x2000);                    /* QEMU fallbacks */
         outw(0xB004, 0x2000);                   /* Bochs / old QEMU */
     }
     kprintf("[sys ] it is now safe to turn off your computer.\n");
@@ -539,20 +540,20 @@ int syscall_dispatch(struct regs *r)
         return 0;
     }
     case SYS_drives: {
-        int max = b < 0 ? 0 : b > NDRIVES ? NDRIVES : b, n = 0;
+        int max = b < 0 ? 0 : b > MAXDRIVES ? MAXDRIVES : b, n = 0;
         if (!user_ok(a, max * sizeof(struct driveinfo)))
             return -EFAULT;
         struct driveinfo *di = (struct driveinfo *)a;
-        for (int i = 0; i < NDRIVES && n < max; i++) {
-            if (!ata_present(i))
+        for (int i = 0; i < NBLK && n < max; i++) {
+            if (!blk_present(i))
                 continue;
             memset(&di[n], 0, sizeof di[n]);
-            di[n].sectors = ata_sectors(i);
+            di[n].sectors = blk_sectors(i);
             di[n].index = i;
-            di[n].boot = i == 0;
-            strcpy(di[n].name, "hda");
-            di[n].name[2] = 'a' + i;
-            safestrcpy(di[n].model, ata_model(i), sizeof di[n].model);
+            di[n].boot = i == boot_disk;
+            di[n].bus = blk_bus(i);
+            safestrcpy(di[n].name, blk_name(i), sizeof di[n].name);
+            safestrcpy(di[n].model, blk_model(i), sizeof di[n].model);
             n++;
         }
         return n;
