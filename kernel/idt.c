@@ -93,6 +93,11 @@ static void irq(struct regs *r)
     case 0: timer_tick(r); break;
     case 1: kbd_irq(); break;
     case 4: serial_irq(); break;
+    case 12: mouse_irq(); break;
+    default:
+        if (n == nic_irq_line)
+            nic_irq();
+        break;
     }
 }
 

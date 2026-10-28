@@ -8,6 +8,7 @@
 .long MB_MAGIC
 .long MB_FLAGS
 .long -(MB_MAGIC + MB_FLAGS)
+.long _start                      # read by the Petrichor bootloader (offset 12)
 
 .section .bss
 .align 16
@@ -20,10 +21,18 @@ boot_stack_top:
 .global _start
 _start:
     cli
+    mov %eax, %esi                  # keep the loader's magic and info pointer
+    mov %ebx, %edx
+    mov $__bss_start, %edi          # a raw loader doesn't clear .bss for us
+    mov $_end, %ecx
+    sub %edi, %ecx
+    xor %eax, %eax
+    cld
+    rep stosb
     mov $boot_stack_top, %esp
     xor %ebp, %ebp
-    push %ebx                       # multiboot info pointer
-    push %eax                       # multiboot magic
+    push %edx                       # multiboot info pointer
+    push %esi                       # multiboot magic
     call kmain
 1:  cli
     hlt

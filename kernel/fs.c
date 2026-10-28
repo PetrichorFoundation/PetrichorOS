@@ -19,6 +19,10 @@ static struct inode *inode_new(u32 type)
 
 static void inode_free(struct inode *ip)
 {
+    if (ip->pfs) {
+        pfs_destroy(ip);
+        return;
+    }
     kfree(ip->data);
     kfree(ip->ents);
     kfree(ip);
@@ -34,6 +38,8 @@ void iput(struct inode *ip)
 
 int inode_read(struct inode *ip, u32 off, void *dst, u32 n)
 {
+    if (ip->pfs)
+        return pfs_read(ip, off, dst, n);
     if (off >= ip->size)
         return 0;
     if (n > ip->size - off)
@@ -44,6 +50,8 @@ int inode_read(struct inode *ip, u32 off, void *dst, u32 n)
 
 int inode_write(struct inode *ip, u32 off, const void *src, u32 n)
 {
+    if (ip->pfs)
+        return pfs_write(ip, off, src, n);
     u32 end = off + n;
     if (end < off)
         return -EFBIG;
@@ -69,6 +77,10 @@ int inode_write(struct inode *ip, u32 off, const void *src, u32 n)
 
 void inode_truncate(struct inode *ip)
 {
+    if (ip->pfs) {
+        pfs_truncate(ip);
+        return;
+    }
     kfree(ip->data);
     ip->data = NULL;
     ip->size = ip->cap = 0;
@@ -87,6 +99,34 @@ static struct dent *dir_find(struct inode *dp, const char *name)
 static int is_dots(const char *name)
 {
     return !strcmp(name, ".") || !strcmp(name, "..");
+}
+
+/* Finds `name` in any directory, RAM or disk. */
+static struct inode *lookup(struct inode *dp, const char *name)
+{
+    if (dp->pfs)
+        return pfs_lookup(dp, name);
+    struct dent *d = dir_find(dp, name);
+    return d ? d->ip : NULL;
+}
+
+u32 inode_nents(struct inode *ip)
+{
+    return ip->pfs ? pfs_nents(ip) : ip->nents;
+}
+
+/* Reads directory entry `idx` into `de`; 1 on success, 0 past the end. */
+int inode_dirent(struct inode *ip, u32 idx, struct dirent *de)
+{
+    if (ip->pfs)
+        return pfs_dirent(ip, idx, de);
+    if (idx >= ip->nents)
+        return 0;
+    struct dent *d = &ip->ents[idx];
+    de->ino = d->ip->ino;
+    de->type = d->ip->type;
+    safestrcpy(de->name, d->name, sizeof de->name);
+    return 1;
 }
 
 static int dir_add(struct inode *dp, const char *name, struct inode *ip)
@@ -169,10 +209,12 @@ static int walk(const char *path, int want_parent, struct inode **out, char *nam
             strcpy(name, comp);
             return 0;
         }
-        struct dent *d = dir_find(ip, comp);
-        if (!d)
+        if (ip->mount_of && !strcmp(comp, ".."))
+            ip = ip->mount_of;                  /* leaving a mounted filesystem */
+        struct inode *next = lookup(ip, comp);
+        if (!next)
             return -ENOENT;
-        ip = d->ip;
+        ip = next->mounted ? next->mounted : next;
     }
     if (want_parent)
         return -EINVAL;
@@ -192,6 +234,8 @@ int fs_create(const char *path, u32 type, struct inode **out)
     int e = walk(path, 1, &dp, name);
     if (e < 0)
         return e;
+    if (dp->pfs)
+        return pfs_create(dp, name, type, out);
     if (dir_find(dp, name))
         return -EEXIST;
     struct inode *ip = type == T_DIR ? dir_new(dp) : inode_new(type);
@@ -215,11 +259,15 @@ int fs_unlink(const char *path)
         return e;
     if (is_dots(name))
         return -EINVAL;
+    if (dp->pfs)
+        return pfs_unlink_entry(dp, name);
     struct dent *d = dir_find(dp, name);
     if (!d)
         return -ENOENT;
     if (d->ip == fs_root)
         return -EPERM;
+    if (d->ip->mounted)
+        return -EBUSY;
     if (d->ip->type == T_DIR && d->ip->nents > 2)
         return -ENOTEMPTY;
     dir_remove(dp, name);
@@ -235,11 +283,15 @@ int fs_rename(const char *from, const char *to)
         return e;
     if (is_dots(oname) || is_dots(nname))
         return -EINVAL;
+    if (op->pfs != np->pfs)
+        return -EXDEV;
+    if (op->pfs)
+        return pfs_rename(op, oname, np, nname);
     struct dent *od = dir_find(op, oname);
     if (!od)
         return -ENOENT;
     struct inode *ip = od->ip;
-    if (ip == fs_root)
+    if (ip == fs_root || ip->mounted)
         return -EPERM;
 
     struct dent *nd = dir_find(np, nname);
@@ -286,16 +338,26 @@ int fs_getcwd(struct inode *ip, char *buf, u32 size)
     char tmp[PATH_MAX];
     u32 pos = sizeof tmp;
     tmp[--pos] = 0;
-    while (ip != fs_root) {
-        struct inode *parent = ip->parent;
-        const char *name = NULL;
-        for (u32 i = 0; i < parent->nents; i++) {
-            if (parent->ents[i].ip == ip && !is_dots(parent->ents[i].name)) {
-                name = parent->ents[i].name;
-                break;
+    for (;;) {
+        if (ip->mount_of)
+            ip = ip->mount_of;                  /* hop from a mounted root to its mountpoint */
+        if (ip == fs_root)
+            break;
+        struct inode *parent = ip->pfs ? pfs_lookup(ip, "..") : ip->parent;
+        char name[NAME_MAX + 1];
+        int found = 0;
+        if (parent && parent->pfs) {
+            found = pfs_name_of(parent, ip->dino, name) == 0;
+        } else if (parent) {
+            for (u32 i = 0; i < parent->nents; i++) {
+                if (parent->ents[i].ip == ip && !is_dots(parent->ents[i].name)) {
+                    strcpy(name, parent->ents[i].name);
+                    found = 1;
+                    break;
+                }
             }
         }
-        if (!name)
+        if (!found)
             return -ENOENT;                     /* directory was removed */
         u32 len = strlen(name);
         if (pos < len + 2)
@@ -330,11 +392,13 @@ void fs_init(void)
     fs_root->nlink = 1;
 
     fs_create("/dev", T_DIR, NULL);
+    fs_create("/disk", T_DIR, NULL);
     make_dev("/dev/console", DEV_CONSOLE);
     make_dev("/dev/tty", DEV_CONSOLE);
     make_dev("/dev/null", DEV_NULL);
     make_dev("/dev/zero", DEV_ZERO);
     make_dev("/dev/random", DEV_RANDOM);
+    make_dev("/dev/input", DEV_INPUT);
 }
 
 /* The initrd is a flat table of {path, type, size, offset} followed by data. */

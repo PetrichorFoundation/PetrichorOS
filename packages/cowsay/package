@@ -1,0 +1,3 @@
+VERSION=1.0
+DEPS=
+DESC="A talking cow (ASCII art)"

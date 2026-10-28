@@ -99,6 +99,8 @@ static int dev_read(struct inode *ip, void *dst, u32 n)
     switch (ip->major) {
     case DEV_CONSOLE:
         return tty_read(dst, n);
+    case DEV_INPUT:
+        return input_read(dst, n);
     case DEV_NULL:
         return 0;
     case DEV_ZERO:
@@ -142,8 +144,13 @@ void file_close(struct file *f)
         return;
     if (f->type == FD_PIPE)
         pipe_close(f->pipe, f->writable);
-    else if (f->type == FD_INODE)
+    else if (f->type == FD_SOCK)
+        sock_close(f->sock);
+    else if (f->type == FD_INODE) {
+        if (f->ip->type == T_DEV && f->ip->major == DEV_INPUT)
+            input_close();
         iput(f->ip);
+    }
     f->type = FD_NONE;
 }
 
@@ -153,6 +160,8 @@ int file_read(struct file *f, void *dst, u32 n)
         return -EBADF;
     if (f->type == FD_PIPE)
         return pipe_read(f->pipe, dst, n);
+    if (f->type == FD_SOCK)
+        return sock_read(f->sock, dst, n);
     struct inode *ip = f->ip;
     switch (ip->type) {
     case T_DIR:
@@ -174,6 +183,8 @@ int file_write(struct file *f, const void *src, u32 n)
         return -EBADF;
     if (f->type == FD_PIPE)
         return pipe_write(f->pipe, src, n);
+    if (f->type == FD_SOCK)
+        return sock_write(f->sock, src, n);
     struct inode *ip = f->ip;
     switch (ip->type) {
     case T_DIR:
@@ -193,6 +204,13 @@ int file_write(struct file *f, const void *src, u32 n)
 
 int file_stat(struct file *f, struct stat *st)
 {
+    if (f->type == FD_SOCK) {
+        st->type = T_SOCK;
+        st->size = 0;
+        st->nlink = 1;
+        st->ino = 0;
+        return 0;
+    }
     if (f->type == FD_PIPE) {
         st->type = T_PIPE;
         st->size = f->pipe->nwrite - f->pipe->nread;
@@ -201,7 +219,7 @@ int file_stat(struct file *f, struct stat *st)
         return 0;
     }
     st->type = f->ip->type;
-    st->size = f->ip->type == T_DIR ? f->ip->nents : f->ip->size;
+    st->size = f->ip->type == T_DIR ? inode_nents(f->ip) : f->ip->size;
     st->nlink = f->ip->nlink;
     st->ino = f->ip->ino;
     return 0;
@@ -212,13 +230,10 @@ int file_readdir(struct file *f, struct dirent *de)
 {
     if (f->type != FD_INODE || f->ip->type != T_DIR)
         return -ENOTDIR;
-    if (f->off >= f->ip->nents)
-        return 0;
-    struct dent *d = &f->ip->ents[f->off++];
-    de->ino = d->ip->ino;
-    de->type = d->ip->type;
-    safestrcpy(de->name, d->name, sizeof de->name);
-    return 1;
+    int r = inode_dirent(f->ip, f->off, de);
+    if (r > 0)
+        f->off++;
+    return r;
 }
 
 int file_seek(struct file *f, int off, int whence)
@@ -236,4 +251,28 @@ int file_seek(struct file *f, int off, int whence)
         return -EINVAL;
     f->off = base + off;
     return f->off;
+}
+
+/* Would read() return without blocking?  POLLIN, plus POLLHUP for a closed pipe. */
+int file_ready(struct file *f)
+{
+    switch (f->type) {
+    case FD_PIPE:
+        if (!f->readable)
+            return 0;
+        if (f->pipe->nread != f->pipe->nwrite)
+            return POLLIN;
+        return f->pipe->writeopen ? 0 : POLLIN | POLLHUP;
+    case FD_SOCK:
+        return sock_ready(f->sock) ? POLLIN : 0;
+    case FD_INODE:
+        if (f->ip->type == T_DEV) {
+            if (f->ip->major == DEV_CONSOLE)
+                return tty_ready() ? POLLIN : 0;
+            if (f->ip->major == DEV_INPUT)
+                return input_ready() ? POLLIN : 0;
+        }
+        return POLLIN;                          /* files and the rest never block */
+    }
+    return 0;
 }

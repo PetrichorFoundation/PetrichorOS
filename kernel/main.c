@@ -33,8 +33,18 @@ void kmain(u32 magic, u32 *mbi)
     mem_init(kb * 1024);
     fs_init();
     initrd_load(_initrd_start, _initrd_end - _initrd_start);
+    {
+        struct inode *mp;
+        if (fs_lookup("/disk", &mp) == 0) {
+            int e = pfs_mount(mp);
+            if (e < 0)
+                kprintf("[disk] no usable disk (%d): /disk stays empty\n", e);
+        }
+    }
     proc_init();
+    net_init();
     kbd_init();
+    mouse_init();
     serial_irq_enable();
     timer_init(TICK_HZ);
 

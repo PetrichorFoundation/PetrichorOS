@@ -54,3 +54,15 @@ SYSCALL getpgid, SYS_getpgid
 SYSCALL tcsetpgrp, SYS_tcsetpgrp
 SYSCALL meminfo, SYS_meminfo
 SYSCALL shutdown, SYS_shutdown
+SYSCALL diskinfo, SYS_diskinfo
+SYSCALL socket, SYS_socket
+SYSCALL connect, SYS_connect
+SYSCALL bind, SYS_bind
+SYSCALL sendto, SYS_sendto
+SYSCALL recvfrom, SYS_recvfrom
+SYSCALL netinfo, SYS_netinfo
+SYSCALL ping, SYS_ping
+SYSCALL settimeout, SYS_settimeout
+SYSCALL poll, SYS_poll
+SYSCALL fbmap, SYS_fbmap
+SYSCALL gettime, SYS_gettime

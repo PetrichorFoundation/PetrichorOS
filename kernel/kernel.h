@@ -20,11 +20,13 @@
 #define PTE_P  0x1u
 #define PTE_RW 0x2u
 #define PTE_US 0x4u
+#define PTE_SHARED 0x200u       /* user page backed by device memory: never copied or freed */
 
 #define DEV_CONSOLE 1
 #define DEV_NULL    2
 #define DEV_ZERO    3
 #define DEV_RANDOM  4
+#define DEV_INPUT   5
 
 /* Register snapshot built by isr_common (see isr.S). */
 struct regs {
@@ -38,6 +40,9 @@ struct regs {
 static inline void outb(u16 port, u8 v) { __asm__ volatile("outb %0, %1" : : "a"(v), "Nd"(port)); }
 static inline u8 inb(u16 port) { u8 v; __asm__ volatile("inb %1, %0" : "=a"(v) : "Nd"(port)); return v; }
 static inline void outw(u16 port, u16 v) { __asm__ volatile("outw %0, %1" : : "a"(v), "Nd"(port)); }
+static inline void outl(u16 port, u32 v) { __asm__ volatile("outl %0, %1" : : "a"(v), "Nd"(port)); }
+static inline u32 inl(u16 port) { u32 v; __asm__ volatile("inl %1, %0" : "=a"(v) : "Nd"(port)); return v; }
+static inline u16 inw(u16 port) { u16 v; __asm__ volatile("inw %1, %0" : "=a"(v) : "Nd"(port)); return v; }
 static inline void cli(void) { __asm__ volatile("cli"); }
 static inline void sti(void) { __asm__ volatile("sti"); }
 static inline u32 read_cr2(void) { u32 v; __asm__ volatile("mov %%cr2, %0" : "=r"(v)); return v; }
@@ -58,7 +63,17 @@ struct inode {
     struct dent *ents;         /* directories (includes "." and "..") */
     u32 nents, cap_ents;
     int major;                 /* devices */
-    struct inode *parent;      /* directories */
+    struct inode *parent;      /* directories (RAM filesystem) */
+
+    /* mounts */
+    struct inode *mounted;     /* on a directory: root of the filesystem mounted here */
+    struct inode *mount_of;    /* on a mounted root: the directory it covers */
+
+    /* disk-backed (PFS) inodes */
+    int pfs;
+    u32 dino;
+    u32 dblk[12], iblk;
+    struct inode *pnext;
 };
 
 struct pipe {
@@ -67,7 +82,9 @@ struct pipe {
     int readopen, writeopen;
 };
 
-enum { FD_NONE, FD_INODE, FD_PIPE };
+enum { FD_NONE, FD_INODE, FD_PIPE, FD_SOCK };
+
+struct sock;
 
 struct file {
     int type;
@@ -75,6 +92,7 @@ struct file {
     int readable, writable, append;
     struct inode *ip;
     struct pipe *pipe;
+    struct sock *sock;
     u32 off;
 };
 
@@ -157,6 +175,53 @@ void inode_truncate(struct inode *ip);
 void iref(struct inode *ip);
 void iput(struct inode *ip);
 int fs_getcwd(struct inode *ip, char *buf, u32 size);
+u32 inode_nents(struct inode *ip);
+int inode_dirent(struct inode *ip, u32 idx, struct dirent *de);
+
+/* ata.c */
+int ata_init(void);
+u32 ata_sectors(void);
+int ata_read(u32 lba, u32 n, void *buf);
+int ata_write(u32 lba, u32 n, const void *buf);
+
+/* pfs.c: on-disk filesystem */
+int pfs_mount(struct inode *mountpoint);
+struct inode *pfs_lookup(struct inode *dir, const char *name);
+int pfs_create(struct inode *dir, const char *name, u32 type, struct inode **out);
+int pfs_unlink_entry(struct inode *dir, const char *name);
+int pfs_rename(struct inode *op, const char *oname, struct inode *np, const char *nname);
+int pfs_read(struct inode *ip, u32 off, void *dst, u32 n);
+int pfs_write(struct inode *ip, u32 off, const void *src, u32 n);
+void pfs_truncate(struct inode *ip);
+void pfs_destroy(struct inode *ip);
+u32 pfs_nents(struct inode *dir);
+int pfs_dirent(struct inode *dir, u32 idx, struct dirent *de);
+int pfs_name_of(struct inode *dir, u32 dino, char *out);
+void pfs_stats(u32 *total_kb, u32 *free_kb);
+
+/* rtl8139.c: network card */
+int nic_init(void);
+int nic_send(const u8 *frame, u32 len);
+void nic_irq(void);
+extern u8 nic_mac[6];
+extern int nic_irq_line;
+
+/* net.c: Ethernet / ARP / IPv4 / ICMP / UDP / TCP and sockets */
+void net_init(void);
+void net_rx(const u8 *frame, u32 len);
+void net_tick(void);
+void net_info(struct netinfo *ni);
+int net_ping(u32 ip, u32 timeout_ms);
+int sock_create(int type, struct sock **out);
+int sock_connect(struct sock *s, u32 ip, u16 port);
+int sock_bind(struct sock *s, u16 port);
+int sock_read(struct sock *s, void *dst, u32 n);
+int sock_write(struct sock *s, const void *src, u32 n);
+int sock_sendto(struct sock *s, const void *buf, u32 n, u32 ip, u16 port);
+int sock_recvfrom(struct sock *s, void *buf, u32 n, struct sockaddr_in *from);
+void sock_close(struct sock *s);
+void sock_settimeout(struct sock *s, u32 ms);
+int sock_ready(struct sock *s);
 
 /* file.c */
 struct file *file_alloc(void);
@@ -167,9 +232,28 @@ int file_write(struct file *f, const void *src, u32 n);
 int file_stat(struct file *f, struct stat *st);
 int file_readdir(struct file *f, struct dirent *de);
 int file_seek(struct file *f, int off, int whence);
+int file_ready(struct file *f);
 int pipe_create(struct file **rf, struct file **wf);
 
+/* input.c: raw keyboard + mouse events for /dev/input */
+void input_push(u8 type, u8 flags, u16 code, i16 dx, i16 dy);
+int input_active(void);
+int input_ready(void);
+int input_read(void *dst, u32 n);
+void input_open(void);
+void input_close(void);
+void mouse_init(void);
+void mouse_irq(void);
+
+/* gfx.c: linear framebuffer (Bochs/QEMU VBE) */
+int gfx_map(struct fbinfo *out, u32 w, u32 h);
+void gfx_off(void);
+extern int gfx_owner;
+u32 pci_read(u32 bus, u32 slot, u32 fn, u32 off);
+void pci_write(u32 bus, u32 slot, u32 fn, u32 off, u32 v);
+
 /* tty.c / kbd.c */
+int tty_ready(void);
 void tty_input(char c);
 int tty_read(char *buf, u32 n);
 void kbd_init(void);
@@ -180,6 +264,7 @@ void proc_init(void);
 void proc_spawn_init(const char *path);
 void schedule(void);
 void yield(void);
+int sleep_until(void *chan, u32 deadline);   /* 1 if the deadline passed */
 void sleep_on(void *chan);
 void wakeup(void *chan);
 int proc_fork(struct regs *r);

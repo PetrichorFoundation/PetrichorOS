@@ -36,6 +36,18 @@ int getpgid(int pid);
 int tcsetpgrp(int pgid);
 int meminfo(struct meminfo *mi);
 int shutdown(int mode);
+int diskinfo(struct diskinfo *di);
+int socket(int type);
+int connect(int fd, u32 ip, u16 port);
+int bind(int fd, u16 port);
+int sendto(int fd, const void *buf, u32 n, u32 ip, u16 port);
+int recvfrom(int fd, void *buf, u32 n, struct sockaddr_in *from);
+int netinfo(struct netinfo *ni);
+int ping(u32 ip, u32 timeout_ms);            /* round-trip time in ticks (10 ms) */
+int settimeout(int fd, u32 ms);
+int poll(struct pollfd *fds, int n, int timeout_ms);   /* timeout < 0: wait forever */
+int fbmap(struct fbinfo *fb, u32 w, u32 h);            /* fb == NULL: back to text mode */
+int gettime(struct rtc_time *t);
 
 /* libc-ish helpers (user/lib/ulib.c) */
 int wait(int *status);
@@ -51,4 +63,10 @@ void *malloc(u32 n);
 void *calloc(u32 n, u32 size);
 void *realloc(void *p, u32 n);
 void free(void *p);
+/* networking helpers (user/lib/net.c); IPv4 addresses are host-order u32 */
+int inet_aton(const char *s, u32 *ip);
+const char *inet_ntoa(u32 ip);
+int resolve(const char *name, u32 *ip);
+int url_split(const char *url, char *host, int hostsz, int *port, const char **path);
+int http_get(const char *url, char **body, int *len);   /* body is malloc'd, NUL-terminated */       /* dotted quad or DNS lookup; 0 or -errno */
 int read_line(int fd, char *buf, int max);   /* returns length, or -1 at EOF */

@@ -113,11 +113,18 @@ static int builtin(struct cmd *c)
 static void run_exec(char **argv)
 {
     char path[PATH_MAX];
-    if (strchr(argv[0], '/'))
+    int e;
+    if (strchr(argv[0], '/')) {
         safestrcpy(path, argv[0], sizeof path);
-    else
+        e = exec(path, argv);
+    } else {                                    /* PATH is /bin:/disk/bin */
         snprintf(path, sizeof path, "/bin/%s", argv[0]);
-    int e = exec(path, argv);
+        e = exec(path, argv);
+        if (e == -ENOENT) {
+            snprintf(path, sizeof path, "/disk/bin/%s", argv[0]);
+            e = exec(path, argv);
+        }
+    }
     if (e == -ENOENT)
         fprintf(2, "sh: %s: command not found\n", argv[0]);
     else

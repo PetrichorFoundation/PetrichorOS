@@ -1,0 +1,3 @@
+VERSION=1.2
+DEPS=
+DESC="Print a random adage"

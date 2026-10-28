@@ -93,3 +93,8 @@ int tty_read(char *buf, u32 n)
         sleep_on(ready);
     }
 }
+
+int tty_ready(void)
+{
+    return rhead != rtail || eof_flag;
+}

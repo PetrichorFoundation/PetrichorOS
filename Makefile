@@ -11,7 +11,7 @@ COMMON := $(TARGET) -ffreestanding -fno-pic -fno-pie -fno-stack-protector \
           -mno-sse -mno-mmx -nostdlibinc -O2 -Wall -Wextra -Wno-unused-parameter \
           -std=gnu11 -Iinclude -MMD -MP
 KCFLAGS := $(COMMON) -Ikernel
-UCFLAGS := $(COMMON) -Iuser/lib
+UCFLAGS := $(COMMON) -Iuser/lib -Ilib
 ASFLAGS := $(TARGET) -Iinclude -I$B
 LDFLAGS := -m elf_i386 -z max-page-size=4096 -z noexecstack
 
@@ -21,12 +21,24 @@ KASM := kernel/boot.S kernel/isr.S kernel/initrd.S
 KOBJ := $(patsubst %.c,$B/%.o,$(KSRC)) $(patsubst %.S,$B/%.o,$(KASM))
 
 # ---- userland ----
-ULIB := $B/user/lib/ulib.o $B/user/lib/usys.o $B/lib/string.o $B/lib/format.o
+ULIB := $B/user/lib/ulib.o $B/user/lib/net.o $B/user/lib/http.o $B/lib/sha256.o $B/user/lib/usys.o $B/lib/string.o $B/lib/format.o
 UBIN := $(patsubst user/bin/%.c,%,$(wildcard user/bin/*.c))
 UEXE := $(addprefix $B/user/out/,$(UBIN))
 
-.PHONY: all run run-nographic clean
-all: $B/petrichor.elf
+# Multi-file programs live in user/apps/<name>/*.c and may use the graphics library.
+GFXLIB := $B/user/lib/gfx.o
+UAPPS  := $(notdir $(wildcard user/apps/*))
+define APP_RULE
+$B/user/out/$(1): $(patsubst %.c,$B/%.o,$(wildcard user/apps/$(1)/*.c)) $(GFXLIB) $(ULIB) user/user.ld
+	@mkdir -p $$(dir $$@)
+	$$(LD) $$(LDFLAGS) -T user/user.ld -o $$@ $$(filter %.o,$$^)
+endef
+$(foreach a,$(UAPPS),$(eval $(call APP_RULE,$(a))))
+UEXE += $(addprefix $B/user/out/,$(UAPPS))
+
+.DEFAULT_GOAL := all
+.PHONY: all run run-multiboot run-nographic clean
+all: $B/petrichor.elf $B/disk.img $B/repo/index
 
 $B/petrichor.elf: $(KOBJ) kernel/kernel.ld
 	$(LD) $(LDFLAGS) -T kernel/kernel.ld -o $@ $(KOBJ)
@@ -45,6 +57,57 @@ $B/user/out/%: $B/user/bin/%.o $(ULIB) user/user.ld
 	@mkdir -p $(dir $@)
 	$(LD) $(LDFLAGS) -T user/user.ld -o $@ $< $(ULIB)
 
+# ---- packages and the package repository ----
+# packages/<name>/package (VERSION, DEPS, DESC), src/*.c -> bin/<prog>, files/ copied as-is.
+PKGS    := $(notdir $(wildcard packages/*))
+PKG_SRC := $(wildcard packages/*/src/*.c)
+define PKGBIN_RULE
+$B/pkgstage/$(1)/bin/$(2): packages/$(1)/src/$(2).c $(ULIB) user/user.ld
+	@mkdir -p $$(dir $$@) $B/pkgobj
+	$$(CC) $$(UCFLAGS) -c $$< -o $B/pkgobj/$(1)-$(2).o
+	$$(LD) $$(LDFLAGS) -T user/user.ld -o $$@ $B/pkgobj/$(1)-$(2).o $$(ULIB)
+endef
+$(foreach s,$(PKG_SRC),$(eval $(call PKGBIN_RULE,$(word 2,$(subst /, ,$(s))),$(basename $(notdir $(s))))))
+PKG_BIN := $(foreach s,$(PKG_SRC),$B/pkgstage/$(word 2,$(subst /, ,$(s)))/bin/$(basename $(notdir $(s))))
+PKG_FILES := $(shell find packages -type f 2>/dev/null)
+
+$B/mkppk: tools/mkppk.c lib/sha256.c lib/sha256.h
+	@mkdir -p $B
+	$(HOSTCC) -O2 -Ilib -o $@ tools/mkppk.c lib/sha256.c
+
+.PHONY: repo serve-repo
+repo: $B/repo/index
+
+$B/repo/index: $B/mkppk $(PKG_BIN) $(PKG_FILES)
+	rm -rf $B/repo
+	mkdir -p $B/repo
+	@for p in $(PKGS); do \
+	  mkdir -p $B/pkgstage/$$p; \
+	  if [ -d packages/$$p/files ]; then cp -R packages/$$p/files/. $B/pkgstage/$$p/; fi; \
+	  ( . packages/$$p/package; $B/mkppk $B/repo $B/pkgstage/$$p $$p "$$VERSION" "$$DEPS" "$$DESC" ) || exit 1; \
+	done
+
+# Host side of `ppm update` (QEMU reaches the host at 10.0.2.2).
+serve-repo: repo
+	cd $B/repo && python3 -m http.server 8080 --bind 127.0.0.1
+
+# ---- bootloader and disk image ----
+$B/boot/%.bin: boot/%.S boot/%.ld
+	@mkdir -p $(dir $@)
+	$(CC) -target i386-unknown-none-elf -c $< -o $B/boot/$*.o
+	$(LD) -m elf_i386 -T boot/$*.ld --oformat binary -o $@ $B/boot/$*.o
+
+$B/kernel.bin: $(KOBJ) kernel/kernel.ld
+	$(LD) $(LDFLAGS) -T kernel/kernel.ld --oformat binary -o $@ $(KOBJ)
+
+$B/mkdisk: tools/mkdisk.c
+	@mkdir -p $B
+	$(HOSTCC) -O2 -o $@ $<
+
+# Updates boot code + kernel in place; the data partition is left alone.
+$B/disk.img: $B/mkdisk $B/boot/stage1.bin $B/boot/stage2.bin $B/kernel.bin
+	$B/mkdisk $B/boot/stage1.bin $B/boot/stage2.bin $B/kernel.bin $@
+
 # ---- root filesystem image ----
 $B/mkinitrd: tools/mkinitrd.c
 	@mkdir -p $B
@@ -60,13 +123,16 @@ $B/initrd.img: $B/mkinitrd $(UEXE) $(ROOTFILES)
 	$B/mkinitrd $@ $B/root
 
 # ---- running ----
-QFLAGS := -kernel $B/petrichor.elf -m 128 -no-reboot
+QEMUFLAGS := -m 128 -no-reboot -drive file=$B/disk.img,format=raw,if=ide -nic user,model=rtl8139
 
 run: all
-	$(QEMU) $(QFLAGS) -serial stdio
+	$(QEMU) $(QEMUFLAGS) -serial stdio
+
+run-multiboot: all
+	$(QEMU) $(QEMUFLAGS) -kernel $B/petrichor.elf -serial stdio
 
 run-nographic: all
-	$(QEMU) $(QFLAGS) -display none -serial mon:stdio
+	$(QEMU) $(QEMUFLAGS) -display none -serial mon:stdio
 
 clean:
 	rm -rf $B

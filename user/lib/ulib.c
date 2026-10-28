@@ -151,6 +151,18 @@ const char *strerror(int err)
     case ENOMEM: return "out of memory";
     case EACCES: return "permission denied";
     case EFAULT: return "bad address";
+    case EBUSY: return "device or resource busy";
+    case EXDEV: return "cross-device link";
+    case ENOTSOCK: return "not a socket";
+    case EADDRINUSE: return "address in use";
+    case ENETDOWN: return "network is down";
+    case ECONNRESET: return "connection reset";
+    case EISCONN: return "already connected";
+    case ENOTCONN: return "not connected";
+    case ETIMEDOUT: return "timed out";
+    case ECONNREFUSED: return "connection refused";
+    case EHOSTUNREACH: return "host unreachable";
+    case EMSGSIZE: return "message too long";
     case EEXIST: return "file exists";
     case ENODEV: return "no such device";
     case ENOTDIR: return "not a directory";

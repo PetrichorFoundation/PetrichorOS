@@ -14,11 +14,26 @@ struct elf_phdr {
 
 #define PT_LOAD 1
 
+static int exec_image(struct proc *p, struct inode *ip, const u8 *img, int argc, char **argv);
+
+/* Disk-backed programs are read into a temporary kernel buffer first. */
 int exec_into(struct proc *p, struct inode *ip, int argc, char **argv)
 {
-    const u8 *img = ip->data;
     if (ip->type != T_FILE)
         return -EACCES;
+    if (!ip->pfs)
+        return exec_image(p, ip, ip->data, argc, argv);
+    u8 *buf = kmalloc(ip->size ? ip->size : 1);
+    if (!buf)
+        return -ENOMEM;
+    int r = inode_read(ip, 0, buf, ip->size) == (int)ip->size
+                ? exec_image(p, ip, buf, argc, argv) : -EIO;
+    kfree(buf);
+    return r;
+}
+
+static int exec_image(struct proc *p, struct inode *ip, const u8 *img, int argc, char **argv)
+{
     if (ip->size < sizeof(struct elf_hdr))
         return -ENOEXEC;
     const struct elf_hdr *eh = (const void *)img;

@@ -1,0 +1,3 @@
+VERSION=1.0
+DEPS=cowsay,fortune
+DESC="A cow that tells fortunes (a #! script)"

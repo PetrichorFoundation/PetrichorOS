@@ -181,7 +181,8 @@ void vmm_unmap(u32 *pd, u32 va)
     u32 pte = vmm_get_pte(pd, va);
     if (!(pte & PTE_P))
         return;
-    pmm_free(pte & ~0xFFFu);
+    if (!(pte & PTE_SHARED))
+        pmm_free(pte & ~0xFFFu);
     ((u32 *)(pd[va >> 22] & ~0xFFFu))[(va >> 12) & 0x3FF] = 0;
     __asm__ volatile("invlpg (%0)" : : "r"(va) : "memory");
 }
@@ -213,8 +214,15 @@ u32 *vmm_clone_pd(u32 *src)
         for (u32 ti = 0; ti < 1024; ti++) {
             if (!(spt[ti] & PTE_P))
                 continue;
-            u32 f = pmm_alloc();
             u32 va = (di << 22) | (ti << 12);
+            if (spt[ti] & PTE_SHARED) {         /* device memory: child shares the mapping */
+                if (vmm_map(pd, va, spt[ti] & ~0xFFFu, spt[ti] & 0xFFFu & ~PTE_P) < 0) {
+                    vmm_free_pd(pd);
+                    return NULL;
+                }
+                continue;
+            }
+            u32 f = pmm_alloc();
             if (!f || vmm_map(pd, va, f, spt[ti] & 0xFFFu & ~PTE_P) < 0) {
                 pmm_free(f);
                 vmm_free_pd(pd);
@@ -233,7 +241,7 @@ void vmm_free_pd(u32 *pd)
             continue;
         u32 *pt = (u32 *)(pd[di] & ~0xFFFu);
         for (u32 ti = 0; ti < 1024; ti++)
-            if (pt[ti] & PTE_P)
+            if ((pt[ti] & PTE_P) && !(pt[ti] & PTE_SHARED))
                 pmm_free(pt[ti] & ~0xFFFu);
         pmm_free((u32)pt);
     }
@@ -248,7 +256,7 @@ u32 vmm_count_pages(u32 *pd)
             continue;
         u32 *pt = (u32 *)(pd[di] & ~0xFFFu);
         for (u32 ti = 0; ti < 1024; ti++)
-            if (pt[ti] & PTE_P)
+            if ((pt[ti] & PTE_P) && !(pt[ti] & PTE_SHARED))
                 n++;
     }
     return n;

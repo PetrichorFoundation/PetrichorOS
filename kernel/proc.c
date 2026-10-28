@@ -121,6 +121,15 @@ void sleep_on(void *chan)
     cur->state = PS_SLEEPING;
     schedule();
     cur->chan = NULL;
+    cur->wake_tick = 0;
+}
+
+/* Sleeps on chan until woken or `deadline` (an absolute tick; 0 = never). */
+int sleep_until(void *chan, u32 deadline)
+{
+    cur->wake_tick = deadline;
+    sleep_on(chan);
+    return deadline && (i32)(ticks - deadline) >= 0;
 }
 
 void wakeup(void *chan)
@@ -137,9 +146,10 @@ void timer_tick(struct regs *r)
         cur->cpu_ticks++;
     for (int i = 1; i < NPROC; i++) {
         struct proc *p = &ptable[i];
-        if (p->state == PS_SLEEPING && p->chan == (void *)&ticks && p->wake_tick <= ticks)
+        if (p->state == PS_SLEEPING && p->wake_tick && (i32)(ticks - p->wake_tick) >= 0)
             p->state = PS_RUNNABLE;
     }
+    net_tick();
     if ((r->cs & 3) == 3)
         yield();                        /* preempt user code only */
 }
@@ -185,6 +195,8 @@ void proc_exit(int status)
 {
     if (cur->pid == 1)
         panic("init exited with status %d", status);
+    if (cur->pid == gfx_owner)
+        gfx_off();                      /* back to the text console */
 
     for (int i = 0; i < NOFILE; i++) {
         if (cur->ofile[i]) {
