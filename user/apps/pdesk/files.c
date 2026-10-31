@@ -165,6 +165,10 @@ static void open_entry(struct files *f, int i)
         browser_open(url);
         return;
     }
+    if (pl > 5 && !strcmp(p + pl - 5, ".rain")) {         /* .rain files are programs: run them in a terminal */
+        term_open(p);
+        return;
+    }
     char head[512];
     int fd = open(p, O_RDONLY), n = fd < 0 ? 0 : read(fd, head, sizeof head);
     if (fd >= 0)
@@ -206,6 +210,8 @@ static int entry_icon(struct files *f, const struct fent *e)
     static const char *const code[] = {"c", "h", "S", "py", "js", "css", "json", "sh", "ld", "mk", "rs", "go"};
     static const char *const text[] = {"txt", "md", "conf", "cfg", "log", "csv", "ini"};
     static const char *const arch[] = {"ppk", "zip", "tar", "gz", "img", "iso", "bin"};
+    if (dot && !strcmp(dot, ".rain"))
+        return ICON_EXEC;
     if (dot && dot[1]) {
         for (u32 i = 0; i < sizeof web / sizeof *web; i++) if (!strcmp(dot + 1, web[i])) return ICON_FILE_WEB;
         for (u32 i = 0; i < sizeof code / sizeof *code; i++) if (!strcmp(dot + 1, code[i])) return ICON_FILE_CODE;

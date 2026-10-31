@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "Hello from a .rain file!"
+echo "A .rain file is a Petrichor program: a native executable or a #! script."

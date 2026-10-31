@@ -203,6 +203,11 @@ package that others need, and the shell finds programs in `/bin` and `/disk/bin`
 File Manager shows type-specific icons (folders, text, code, web, archives, programs).
 `pdesk --icons` opens a gallery of all of them.
 
+**`.rain` files** are Petrichor's executables: a native program or a `#!` script whose name ends in `.rain`.
+Run one by typing its name (`hello.rain` in the current directory, or a path), or leave the extension off for
+programs in `/bin` and `/disk/bin` (`hello` finds `hello.rain` if there is no plain `hello`). In the File Manager they
+get the program icon and double-clicking runs them in a terminal. `/bin/hello.rain` is a sample script.
+
 **Userland** (`user/`): a tiny libc (`printf`, `malloc`, DNS resolver, HTTP/HTTPS client, SHA-256, a 2D
 graphics library with an 8x16 font), `init`, and `sh` (pipes, `<` `>` `>>`, `;`, `&`, quoting,
 scripts, `cd`), plus

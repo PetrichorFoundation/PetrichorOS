@@ -110,19 +110,34 @@ static int builtin(struct cmd *c)
     return 0;
 }
 
+/* Tries `path`, then `path.rain`. */
+static int exec_rain(const char *path, char **argv)
+{
+    char p[PATH_MAX];
+    int e = exec(path, argv);
+    if (e == -ENOENT && !strstr(path, ".rain")) {
+        snprintf(p, sizeof p, "%s.rain", path);
+        e = exec(p, argv);
+    }
+    return e;
+}
+
+/* .rain files are Petrichor's executables: a native program or a #! script, found with or without the extension. */
 static void run_exec(char **argv)
 {
     char path[PATH_MAX];
     int e;
     if (strchr(argv[0], '/')) {
-        safestrcpy(path, argv[0], sizeof path);
-        e = exec(path, argv);
-    } else {                                    /* PATH is /bin:/disk/bin */
-        snprintf(path, sizeof path, "/bin/%s", argv[0]);
-        e = exec(path, argv);
-        if (e == -ENOENT) {
-            snprintf(path, sizeof path, "/disk/bin/%s", argv[0]);
-            e = exec(path, argv);
+        e = exec_rain(argv[0], argv);
+    } else {                                    /* PATH is the current directory (for .rain files), /bin, /disk/bin */
+        e = -ENOENT;
+        int len = strlen(argv[0]);
+        if (len > 5 && !strcmp(argv[0] + len - 5, ".rain"))
+            e = exec(argv[0], argv);
+        const char *dirs[] = {"/bin", "/disk/bin"};
+        for (int i = 0; i < 2 && e == -ENOENT; i++) {
+            snprintf(path, sizeof path, "%s/%s", dirs[i], argv[0]);
+            e = exec_rain(path, argv);
         }
     }
     if (e == -ENOENT)
