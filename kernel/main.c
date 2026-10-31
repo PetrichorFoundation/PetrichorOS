@@ -11,7 +11,7 @@ static void banner(void)
     kprintf(" |  _/ -_)  _| '_| / _| ' \\/ _ \\ '_|    | (_) \\__ \\\n");
     kprintf(" |_| \\___|\\__|_| |_\\__|_||_\\___/_|       \\___/|___/\n");
     kprintf("\033[0m");
-    kprintf(" %s %s - a from-scratch Unix for i386\n\n", PETRICHOR_NAME, PETRICHOR_VERSION);
+    kprintf(" %s %s - a from-scratch Unix for x86_64\n\n", PETRICHOR_NAME, PETRICHOR_VERSION);
 }
 
 void kmain(u32 magic, u32 *mbi)
@@ -30,7 +30,7 @@ void kmain(u32 magic, u32 *mbi)
     }
 
     if ((mbi[0] & 8) && mbi[5] >= 1 && mbi[6]) {      /* flags bit 3: modules (the pristine kernel copy) */
-        const u32 *mod = (const u32 *)mbi[6];
+        const u32 *mod = (const u32 *)(uptr)mbi[6];
         bootinfo.kimg = mod[0];
         bootinfo.kimg_size = mod[1] - mod[0];
     }
@@ -44,7 +44,7 @@ void kmain(u32 magic, u32 *mbi)
 
     static char cmdline[128];
     if ((mbi[0] & 4) && mbi[4]) {                   /* flags bit 2: a command line from the loader */
-        const char *src = (const char *)mbi[4];
+        const char *src = (const char *)(uptr)mbi[4];
         u32 n = 0;
         while (src[n] && n < sizeof cmdline - 1) {
             cmdline[n] = src[n];

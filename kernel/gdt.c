@@ -1,4 +1,4 @@
-/* Flat segmentation: kernel code/data, user code/data, one TSS. */
+/* Long-mode segmentation: flat kernel/user code and data, and one 64-bit TSS (only used for rsp0). */
 #include "kernel.h"
 
 struct gdt_entry {
@@ -8,17 +8,19 @@ struct gdt_entry {
 
 struct gdt_ptr {
     u16 limit;
-    u32 base;
+    u64 base;
 } __attribute__((packed));
 
 struct tss {
-    u32 prev, esp0, ss0, esp1, ss1, esp2, ss2, cr3, eip, eflags;
-    u32 eax, ecx, edx, ebx, esp, ebp, esi, edi;
-    u32 es, cs, ss, ds, fs, gs, ldt;
-    u16 trap, iomap;
+    u32 res0;
+    u64 rsp0, rsp1, rsp2;
+    u64 res1;
+    u64 ist[7];
+    u64 res2;
+    u16 res3, iomap;
 } __attribute__((packed));
 
-static struct gdt_entry gdt[6];
+static struct gdt_entry gdt[7];                  /* the TSS descriptor takes two slots */
 static struct gdt_ptr gp;
 static struct tss tss;
 
@@ -35,23 +37,24 @@ static void gate(int i, u32 base, u32 limit, u8 access, u8 gran)
 void gdt_init(void)
 {
     gate(0, 0, 0, 0, 0);
-    gate(1, 0, 0xFFFFF, 0x9A, 0xC0);   /* 0x08 kernel code */
+    gate(1, 0, 0xFFFFF, 0x9A, 0xA0);   /* 0x08 kernel code (long mode) */
     gate(2, 0, 0xFFFFF, 0x92, 0xC0);   /* 0x10 kernel data */
-    gate(3, 0, 0xFFFFF, 0xFA, 0xC0);   /* 0x18 user code   */
-    gate(4, 0, 0xFFFFF, 0xF2, 0xC0);   /* 0x20 user data   */
-    gate(5, (u32)&tss, sizeof tss - 1, 0x89, 0x00);
-
+    gate(3, 0, 0xFFFFF, 0xF2, 0xC0);   /* 0x18 user data   */
+    gate(4, 0, 0xFFFFF, 0xFA, 0xA0);   /* 0x20 user code (long mode) */
     memset(&tss, 0, sizeof tss);
-    tss.ss0 = 0x10;
     tss.iomap = sizeof tss;
+    u64 base = (u64)(uptr)&tss;
+    gate(5, (u32)base, sizeof tss - 1, 0x89, 0x00);       /* 0x28 TSS: a 16-byte descriptor */
+    memset(&gdt[6], 0, sizeof gdt[6]);
+    *(u32 *)&gdt[6] = (u32)(base >> 32);
 
     gp.limit = sizeof gdt - 1;
-    gp.base = (u32)gdt;
+    gp.base = (u64)(uptr)gdt;
     gdt_flush(&gp);
     __asm__ volatile("ltr %%ax" : : "a"(0x28));
 }
 
-void tss_set_kstack(u32 sp)
+void tss_set_kstack(uptr sp)
 {
-    tss.esp0 = sp;
+    tss.rsp0 = sp;
 }

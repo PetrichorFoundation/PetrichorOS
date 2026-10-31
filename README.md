@@ -2,7 +2,7 @@
 
 *petrichor* (n.): the smell of rain on dry earth.
 
-A small Unix-like operating system written from scratch for 32-bit x86. No Linux, no BSD,
+A small Unix-like operating system written from scratch for 64-bit x86 (x86_64). No Linux, no BSD,
 no borrowed kernel or libc: the kernel, C library, shell and utilities are all in this repo.
 
 ```
@@ -15,7 +15,7 @@ no borrowed kernel or libc: the kernel, C library, shell and utilities are all i
 ## Quick start (macOS or Linux host)
 
 ```sh
-brew install lld qemu     # plus clang (Xcode command line tools)
+brew install lld qemu     # plus clang (Xcode command line tools); the build uses qemu-system-x86_64
 make run                  # boots build/disk.img: boot menu, then straight into the desktop
 make run-nographic        # same, with the serial console in your terminal (Ctrl-A X quits)
 make run-multiboot        # skip the bootloader: QEMU loads the kernel directly
@@ -86,7 +86,10 @@ Files you put in `/disk` survive reboots (`make` updates the bootloader and kern
 loads stage 2 with INT 13h extended reads. Stage 2 enables A20, asks the BIOS for the RAM size
 (INT 15h/E801), shows a boot menu (arrow keys or 1-4, auto-boot after four seconds), copies the
 kernel above 1 MiB in 32 KiB chunks (INT 15h/87h), switches to 32-bit protected mode and jumps to the
-kernel using the Multiboot register convention, passing the chosen entry as a kernel command line.
+kernel's entry stub using the Multiboot register convention, passing the chosen entry as a kernel command
+line. The stub (`kernel/boot.S`) builds page tables, turns on PAE and long mode, and calls the 64-bit `kmain`;
+it stops with a message on a CPU that lacks long mode. The kernel image carries a Multiboot header with the
+"a.out kludge", so QEMU's `-kernel` can load the flat `build/kernel.bin` directly.
 `tools/mkdisk` lays it all out on the disk image.
 
 **Graphics at boot.** For the default and "graphical desktop" menu entries the bootloader asks the BIOS
@@ -105,10 +108,10 @@ to the desktop when it exits.
 
 | Area | Details |
 | --- | --- |
-| Boot | Multiboot entry (own bootloader or QEMU/GRUB), GDT with ring 0/3 segments and a TSS |
+| Boot | Multiboot entry (own bootloader or QEMU) in 32-bit mode, then long mode; 64-bit GDT with ring 0/3 segments and a TSS |
 | Interrupts | IDT, remapped 8259 PIC, 100 Hz PIT, `int 0x80` syscalls |
 | Memory | Physical frame bitmap, first-fit kernel heap, 2-level paging, per-process address spaces, shared device-memory mappings |
-| Processes | `fork`, `exec` (ELF32 and `#!` scripts), `wait`, `exit`, `kill`, process groups, preemptive round-robin scheduler for user code, sleep/wakeup with timeouts, `poll` |
+| Processes | `fork`, `exec` (ELF64 and `#!` scripts), `wait`, `exit`, `kill`, process groups, preemptive round-robin scheduler for user code, sleep/wakeup with timeouts, `poll` |
 | Filesystems | A RAM filesystem for `/` (unpacked from an initrd) and **PFS**, an on-disk filesystem mounted at `/disk` (below) |
 | Disk | A block-device layer with three drivers: legacy IDE (PIO), **AHCI/SATA** (DMA) and **NVMe**; raw `/dev/hda`.. block devices; the boot disk is identified by content, so any bus works; 64-block write-through buffer cache |
 | Power | ACPI soft-off (RSDP/RSDT/FADT/DSDT `_S5_`), keyboard-controller reset |
@@ -230,13 +233,16 @@ tools/      host tools: mkinitrd (root image), mkdisk (bootloader + kernel -> di
 
 ## Design notes
 
-- **Memory map.** The kernel lives at 1 MiB and all RAM is identity-mapped (supervisor-only) in
-  every address space, so the kernel can reach any physical frame directly. User programs are
-  linked at `0x40000000`; the stack tops out at `0xC0000000`.
+- **Memory map.** The kernel is 64-bit, but everything lives in the low 4 GiB and the layout is simple: the
+  kernel sits at 1 MiB and RAM is identity-mapped (supervisor-only, 2 MiB pages) at [0, 1 GiB) in every
+  address space, so the kernel can reach any physical frame directly. User programs are linked at
+  `0x40000000` and the stack tops out at `0xC0000000`; device memory (PCI BARs, the framebuffer) is mapped in
+  a shared window above 3 GiB. Each process has its own 4-level page tables (PML4).
 - **Concurrency model.** The kernel runs with interrupts off and is not preemptible; only user
   code is preempted. This keeps the kernel free of locks. Blocking calls sleep on a channel.
-- **System calls.** `eax` = number, `ebx ecx edx esi edi` = arguments, result in `eax`, negative
-  values are `-errno`. See `include/abi.h`.
+- **System calls.** `int 0x80` with `rax` = number, `rdi rsi rdx r10 r8` = arguments, result in `rax`, negative
+  values are `-errno`. User programs use the normal x86_64 C calling convention; `user/lib/usys.S` moves the
+  fourth argument from `rcx` to `r10`. See `include/abi.h`.
 - **Storage.** `/` is a RAM filesystem rebuilt from the initrd each boot, so changes outside
   `/disk` are lost on reboot. `/disk` is persistent.
 - **Disk image layout.** LBA 0 MBR, 1-15 stage 2, 16+ kernel image, 4096+ PFS partition.
@@ -255,7 +261,7 @@ QEMU's monitor (injected mouse/keys plus screenshots), a two-disk setup, and a h
 
 ## Limits and ideas
 
-Single CPU, no SMP. The kernel is 32-bit with at most 512 MiB of RAM, and disks over 2 TiB aren't
+Single CPU, no SMP. The kernel is 64-bit but only uses the low 4 GiB (at most 512 MiB of RAM is used), and needs an x86_64 CPU, and disks over 2 TiB aren't
 addressed fully. The root filesystem isn't persistent and PFS has no journal and caps files at ~4 MiB.
 Disk drivers are polled (no interrupts), AHCI/NVMe use one queue and one command at a time, and NVMe
 needs 512-byte sectors. The installer copies the whole boot region and has no partitioning, no

@@ -1,19 +1,19 @@
-# Petrichor OS build.  Needs: clang (any recent), ld.lld, qemu-system-i386.
+# Petrichor OS build.  Needs: clang (any recent), ld.lld, qemu-system-x86_64.
 
 CC     := clang
 LD     := ld.lld
 HOSTCC := cc
-QEMU   := qemu-system-i386
+QEMU   := qemu-system-x86_64
 B      := build
 
-TARGET := -target i686-unknown-none-elf
+TARGET := -target x86_64-unknown-none-elf
 COMMON := $(TARGET) -ffreestanding -fno-pic -fno-pie -fno-stack-protector \
-          -mno-sse -mno-mmx -nostdlibinc -O2 -Wall -Wextra -Wno-unused-parameter \
+          -mno-sse -mno-mmx -mno-red-zone -nostdlibinc -O2 -Wall -Wextra -Wno-unused-parameter \
           -std=gnu11 -Iinclude -MMD -MP
 KCFLAGS := $(COMMON) -Ikernel -Ilib
 UCFLAGS := $(COMMON) -Iuser/lib -Ilib
 ASFLAGS := $(TARGET) -Iinclude -I$B
-LDFLAGS := -m elf_i386 -z max-page-size=4096 -z noexecstack
+LDFLAGS := -m elf_x86_64 -z max-page-size=4096 -z noexecstack
 
 # ---- kernel ----
 KSRC := $(wildcard kernel/*.c) lib/string.c lib/format.c lib/sha256.c
@@ -165,7 +165,7 @@ clean-target:
 	rm -f $B/target.img
 
 run-multiboot: all
-	$(QEMU) $(QEMUFLAGS) -kernel $B/petrichor.elf -serial stdio
+	$(QEMU) $(QEMUFLAGS) -kernel $B/kernel.bin -serial stdio
 
 run-nographic: all
 	$(QEMU) $(QEMUFLAGS) -display none -serial mon:stdio

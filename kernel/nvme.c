@@ -53,8 +53,8 @@ static int nvme_rw(void *priv, u32 lba, u32 n, void *buf, int write)
         u32 cmd[16] = {0};
         cmd[0] = write ? 0x01 : 0x02;
         cmd[1] = d->nsid;
-        cmd[6] = (u32)d->pg_a;
-        cmd[8] = bytes > 4096 ? (u32)d->pg_b : 0;
+        cmd[6] = (u32)(uptr)d->pg_a;
+        cmd[8] = bytes > 4096 ? (u32)(uptr)d->pg_b : 0;
         cmd[10] = lba;
         cmd[11] = 0;
         cmd[12] = chunk - 1;
@@ -108,8 +108,8 @@ static int attach(struct pcidev *dev)
     }
     u32 asq = pmm_alloc(), acq = pmm_alloc(), isq = pmm_alloc(), icq = pmm_alloc();
     u32 idp = pmm_alloc();
-    d->pg_a = (u8 *)pmm_alloc();
-    d->pg_b = (u8 *)pmm_alloc();
+    d->pg_a = (u8 *)(uptr)pmm_alloc();
+    d->pg_b = (u8 *)(uptr)pmm_alloc();
     if (!asq || !acq || !isq || !icq || !idp || !d->pg_a || !d->pg_b)
         return 0;
 
@@ -122,10 +122,10 @@ static int attach(struct pcidev *dev)
     if (wait_ready(regs, 1) < 0)
         return 0;
 
-    d->admin = (struct queue){.sq = (u32 *)asq, .cq = (u32 *)acq, .phase = 1,
+    d->admin = (struct queue){.sq = (u32 *)(uptr)asq, .cq = (u32 *)(uptr)acq, .phase = 1,
                               .sq_db = (volatile u32 *)((u8 *)regs + 0x1000),
                               .cq_db = (volatile u32 *)((u8 *)regs + 0x1000 + stride)};
-    d->io = (struct queue){.sq = (u32 *)isq, .cq = (u32 *)icq, .phase = 1,
+    d->io = (struct queue){.sq = (u32 *)(uptr)isq, .cq = (u32 *)(uptr)icq, .phase = 1,
                            .sq_db = (volatile u32 *)((u8 *)regs + 0x1000 + 2 * stride),
                            .cq_db = (volatile u32 *)((u8 *)regs + 0x1000 + 3 * stride)};
 
@@ -144,7 +144,7 @@ static int attach(struct pcidev *dev)
     if (submit(&d->admin, cmd) < 0)
         return 0;
 
-    u8 *id = (u8 *)idp;
+    u8 *id = (u8 *)(uptr)idp;
     memset(cmd, 0, sizeof cmd);
     cmd[0] = 0x06;                                              /* identify controller (for the model name) */
     cmd[6] = idp;

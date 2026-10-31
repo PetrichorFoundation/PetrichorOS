@@ -27,8 +27,8 @@ static u32 find_rsdt(void)
         if (r == 0 && (ebda < 0x80000 || ebda >= 0xA0000))
             continue;
         for (u32 a = ranges[r][0]; a + 20 <= ranges[r][1]; a += 16)
-            if (!memcmp((void *)a, "RSD PTR ", 8))
-                return *(u32 *)(a + 16);                    /* RsdtAddress */
+            if (!memcmp((void *)(uptr)a, "RSD PTR ", 8))
+                return *(u32 *)(uptr)(a + 16);                    /* RsdtAddress */
     }
     return 0;
 }

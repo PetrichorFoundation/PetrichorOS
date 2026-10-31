@@ -491,7 +491,7 @@ pm_entry:
     mov esp, 0x90000
     mov eax, 0x2BADB002
     mov ebx, MBI
-    mov ecx, dword ptr [0x10000C]   # kernel entry point, stored after the Multiboot header
+    mov ecx, dword ptr [0x10001C]   # kernel entry point: entry_addr in the Multiboot (a.out kludge) header
     jmp ecx
 
 .code16

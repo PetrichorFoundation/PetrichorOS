@@ -215,7 +215,7 @@ void *malloc(u32 n)
     }
     u32 grow = (n + sizeof(struct mblock) + 4095) & ~4095u;
     struct mblock *b = sbrk(grow);
-    if ((int)b < 0)
+    if (b == (void *)-1 || (long)b < 0)
         return NULL;
     b->size = grow - sizeof *b;
     b->free = 0;

@@ -9,21 +9,21 @@ isr_table:
     .text
     .global isr\n
 isr\n:
-    pushl $0
-    pushl $\n
+    pushq $0
+    pushq $\n
     jmp isr_common
     .section .isrtab, "a"
-    .long isr\n
+    .quad isr\n
 .endm
 
 .macro ISR_ERR n
     .text
     .global isr\n
 isr\n:
-    pushl $\n
+    pushq $\n
     jmp isr_common
     .section .isrtab, "a"
-    .long isr\n
+    .quad isr\n
 .endm
 
 ISR_NOERR 0
@@ -78,33 +78,47 @@ ISR_NOERR 47
 .text
 .global isr128
 isr128:
-    pushl $0
-    pushl $128
+    pushq $0
+    pushq $128
     jmp isr_common
 
 isr_common:
-    pushl %gs
-    pushl %fs
-    pushl %es
-    pushl %ds
-    pushal
-    mov $0x10, %ax
-    mov %ax, %ds
-    mov %ax, %es
-    mov %ax, %fs
-    mov %ax, %gs
+    push %rax
+    push %rcx
+    push %rdx
+    push %rbx
+    push %rbp
+    push %rsi
+    push %rdi
+    push %r8
+    push %r9
+    push %r10
+    push %r11
+    push %r12
+    push %r13
+    push %r14
+    push %r15
     cld
-    push %esp
+    mov %rsp, %rdi
     call trap_handler
-    add $4, %esp
 
-# New processes "return" here from switch_context with esp at their trapframe.
+# New processes "return" here from switch_context with rsp at their trapframe.
 .global trapret
 trapret:
-    popal
-    popl %ds
-    popl %es
-    popl %fs
-    popl %gs
-    add $8, %esp
-    iret
+    pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %r11
+    pop %r10
+    pop %r9
+    pop %r8
+    pop %rdi
+    pop %rsi
+    pop %rbp
+    pop %rbx
+    pop %rdx
+    pop %rcx
+    pop %rax
+    add $16, %rsp
+    iretq

@@ -42,7 +42,7 @@ static int copy_in_str(u32 uaddr, char *dst, u32 max)
         if (i == 0 || ((uaddr + i) & 0xFFF) == 0)
             if (!user_ok(uaddr + i, 1))
                 return -EFAULT;
-        dst[i] = *(char *)(uaddr + i);
+        dst[i] = *(char *)(uptr)(uaddr + i);
         if (!dst[i])
             return i;
     }
@@ -139,7 +139,7 @@ static int sys_pipe(u32 uaddr)
         file_close(wf);
         return -EMFILE;
     }
-    int *fds = (int *)uaddr;
+    int *fds = (int *)(uptr)uaddr;
     fds[0] = rfd;
     fds[1] = wfd;
     return 0;
@@ -189,9 +189,9 @@ static int sys_exec(u32 upath, u32 uargv)
     int argc = 0;
     u32 used = 0;
     for (;; argc++) {
-        if (!user_ok(uargv + argc * 4, 4))
+        if (!user_ok(uargv + argc * 8, 8))
             return -EFAULT;
-        u32 sp = ((u32 *)uargv)[argc];
+        u32 sp = (u32)((u64 *)(uptr)uargv)[argc];             /* argv entries are 8 bytes; addresses fit in 32 bits */
         if (!sp)
             break;
         if (argc == MAXARG)
@@ -255,7 +255,7 @@ static int sys_ps(u32 ubuf, int max)
 {
     if (max < 0 || !user_ok(ubuf, max * sizeof(struct procinfo)))
         return -EFAULT;
-    struct procinfo *out = (struct procinfo *)ubuf;
+    struct procinfo *out = (struct procinfo *)(uptr)ubuf;
     int n = 0;
     for (int i = 0; i < NPROC && n < max; i++) {
         struct proc *p = &ptable[i];
@@ -290,12 +290,13 @@ static int sys_shutdown(int mode)
 
 int syscall_dispatch(struct regs *r)
 {
-    u32 a = r->ebx, b = r->ecx, c = r->edx;
+    u32 a = (u32)r->rdi, b = (u32)r->rsi, c = (u32)r->rdx;      /* user addresses are all below 4 GiB */
+    u32 d = (u32)r->r10, e5 = (u32)r->r8;
     char path[PATH_MAX], path2[PATH_MAX];
     struct file *f;
     int e;
 
-    switch (r->eax) {
+    switch ((u32)r->rax) {
     case SYS_exit:
         proc_exit(a);
     case SYS_fork:
@@ -305,13 +306,13 @@ int syscall_dispatch(struct regs *r)
             return -EBADF;
         if (!user_ok(b, c))
             return -EFAULT;
-        return file_read(f, (void *)b, c);
+        return file_read(f, (void *)(uptr)b, c);
     case SYS_write:
         if (!(f = fd_get(a)))
             return -EBADF;
         if (!user_ok(b, c))
             return -EFAULT;
-        return file_write(f, (void *)b, c);
+        return file_write(f, (void *)(uptr)b, c);
     case SYS_open:
         if ((e = copy_in_str(a, path, sizeof path)) < 0)
             return e;
@@ -328,7 +329,7 @@ int syscall_dispatch(struct regs *r)
         if (pid > 0 && a) {
             if (!user_ok(a, 4))
                 return -EFAULT;
-            *(int *)a = status;
+            *(int *)(uptr)a = status;
         }
         return pid;
     }
@@ -378,7 +379,7 @@ int syscall_dispatch(struct regs *r)
             return e;
         if (strlen(path) + 1 > b)
             return -ENAMETOOLONG;
-        strcpy((char *)a, path);
+        strcpy((char *)(uptr)a, path);
         return 0;
     case SYS_mkdir:
         if ((e = copy_in_str(a, path, sizeof path)) < 0)
@@ -393,14 +394,14 @@ int syscall_dispatch(struct regs *r)
             return -EBADF;
         if (!user_ok(b, sizeof(struct stat)))
             return -EFAULT;
-        return file_stat(f, (struct stat *)b);
+        return file_stat(f, (struct stat *)(uptr)b);
     case SYS_stat: {
         struct inode *ip;
         if ((e = copy_in_str(a, path, sizeof path)) < 0 || (e = fs_lookup(path, &ip)) < 0)
             return e;
         if (!user_ok(b, sizeof(struct stat)))
             return -EFAULT;
-        struct stat *st = (struct stat *)b;
+        struct stat *st = (struct stat *)(uptr)b;
         st->type = ip->type;
         st->size = inode_size(ip);
         st->nlink = ip->nlink;
@@ -412,7 +413,7 @@ int syscall_dispatch(struct regs *r)
             return -EBADF;
         if (!user_ok(b, sizeof(struct dirent)))
             return -EFAULT;
-        return file_readdir(f, (struct dirent *)b);
+        return file_readdir(f, (struct dirent *)(uptr)b);
     case SYS_kill:
         return proc_kill(a);
     case SYS_uptime:
@@ -445,7 +446,7 @@ int syscall_dispatch(struct regs *r)
     case SYS_meminfo: {
         if (!user_ok(a, sizeof(struct meminfo)))
             return -EFAULT;
-        struct meminfo *mi = (struct meminfo *)a;
+        struct meminfo *mi = (struct meminfo *)(uptr)a;
         u32 ht, hf;
         pmm_stats(&mi->total_kb, &mi->free_kb);
         heap_stats(&ht, &hf);
@@ -456,7 +457,7 @@ int syscall_dispatch(struct regs *r)
     case SYS_diskinfo: {
         if (!user_ok(a, sizeof(struct diskinfo)))
             return -EFAULT;
-        struct diskinfo *di = (struct diskinfo *)a;
+        struct diskinfo *di = (struct diskinfo *)(uptr)a;
         pfs_stats(&di->total_kb, &di->free_kb);
         di->mounted = di->total_kb != 0;
         return 0;
@@ -477,20 +478,20 @@ int syscall_dispatch(struct regs *r)
             return -ENOTSOCK;
         if (!user_ok(b, c))
             return -EFAULT;
-        return sock_sendto(s, (void *)b, c, r->esi, r->edi);
+        return sock_sendto(s, (void *)(uptr)b, c, d, e5);
     }
     case SYS_recvfrom: {
         struct sock *s = fd_sock(a);
         if (!s)
             return -ENOTSOCK;
-        if (!user_ok(b, c) || (r->esi && !user_ok(r->esi, sizeof(struct sockaddr_in))))
+        if (!user_ok(b, c) || (d && !user_ok(d, sizeof(struct sockaddr_in))))
             return -EFAULT;
-        return sock_recvfrom(s, (void *)b, c, (struct sockaddr_in *)r->esi);
+        return sock_recvfrom(s, (void *)(uptr)b, c, (struct sockaddr_in *)(uptr)d);
     }
     case SYS_netinfo:
         if (!user_ok(a, sizeof(struct netinfo)))
             return -EFAULT;
-        net_info((struct netinfo *)a);
+        net_info((struct netinfo *)(uptr)a);
         return 0;
     case SYS_ping:
         return net_ping(a, b);
@@ -502,7 +503,7 @@ int syscall_dispatch(struct regs *r)
         return 0;
     }
     case SYS_poll: {
-        struct pollfd *fds = (struct pollfd *)a;
+        struct pollfd *fds = (struct pollfd *)(uptr)a;
         int n = b, timeout = (int)c;
         if (n < 0 || n > 16 || !user_ok(a, n * sizeof *fds))
             return -EFAULT;
@@ -532,18 +533,18 @@ int syscall_dispatch(struct regs *r)
         }
         if (!user_ok(a, sizeof(struct fbinfo)))
             return -EFAULT;
-        return gfx_map((struct fbinfo *)a, b, c);
+        return gfx_map((struct fbinfo *)(uptr)a, b, c);
     case SYS_gettime: {
         if (!user_ok(a, sizeof(struct rtc_time)))
             return -EFAULT;
-        rtc_read((struct rtc_time *)a);
+        rtc_read((struct rtc_time *)(uptr)a);
         return 0;
     }
     case SYS_drives: {
         int max = b < 0 ? 0 : b > MAXDRIVES ? MAXDRIVES : b, n = 0;
         if (!user_ok(a, max * sizeof(struct driveinfo)))
             return -EFAULT;
-        struct driveinfo *di = (struct driveinfo *)a;
+        struct driveinfo *di = (struct driveinfo *)(uptr)a;
         for (int i = 0; i < NBLK && n < max; i++) {
             if (!blk_present(i))
                 continue;

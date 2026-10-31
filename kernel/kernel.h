@@ -18,10 +18,11 @@
 #define MAXARG           32
 #define PIPE_SIZE        4096
 
-#define PTE_P  0x1u
-#define PTE_RW 0x2u
-#define PTE_US 0x4u
-#define PTE_SHARED 0x200u       /* user page backed by device memory: never copied or freed */
+#define PTE_P  0x1ull
+#define PTE_RW 0x2ull
+#define PTE_US 0x4ull
+#define PTE_PS 0x80ull          /* 2 MiB page (in a page directory entry) */
+#define PTE_SHARED 0x200ull       /* user page backed by device memory: never copied or freed */
 
 #define DEV_CONSOLE 1
 #define DEV_NULL    2
@@ -34,10 +35,9 @@
 
 /* Register snapshot built by isr_common (see isr.S). */
 struct regs {
-    u32 edi, esi, ebp, esp_dummy, ebx, edx, ecx, eax;
-    u32 ds, es, fs, gs;
-    u32 int_no, err_code;
-    u32 eip, cs, eflags, useresp, ss;
+    u64 r15, r14, r13, r12, r11, r10, r9, r8, rdi, rsi, rbp, rbx, rdx, rcx, rax;
+    u64 int_no, err_code;
+    u64 rip, cs, rflags, rsp, ss;
 };
 
 /* ---- port I/O and CPU helpers ---- */
@@ -49,7 +49,7 @@ static inline u32 inl(u16 port) { u32 v; __asm__ volatile("inl %1, %0" : "=a"(v)
 static inline u16 inw(u16 port) { u16 v; __asm__ volatile("inw %1, %0" : "=a"(v) : "Nd"(port)); return v; }
 static inline void cli(void) { __asm__ volatile("cli"); }
 static inline void sti(void) { __asm__ volatile("sti"); }
-static inline u32 read_cr2(void) { u32 v; __asm__ volatile("mov %%cr2, %0" : "=r"(v)); return v; }
+static inline u64 read_cr2(void) { u64 v; __asm__ volatile("mov %%cr2, %0" : "=r"(v)); return v; }
 
 /* ---- filesystem objects ---- */
 struct dent {
@@ -104,11 +104,11 @@ struct file {
 struct proc {
     int pid, ppid, pgid;
     int state;
-    u32 *pd;
+    u64 *pd;
     u32 brk, brk_start;
     u8 *kstack;
     struct regs *tf;
-    u32 ctx_sp;
+    uptr ctx_sp;
     void *chan;
     u32 wake_tick;
     int killed, exit_status;
@@ -144,14 +144,14 @@ void panic(const char *fmt, ...) __attribute__((noreturn));
 
 /* gdt.c / idt.c */
 void gdt_init(void);
-void tss_set_kstack(u32 sp);
+void tss_set_kstack(uptr sp);
 void idt_init(void);
 void irq_unmask(int irq);
 void timer_init(u32 hz);
 void trap_handler(struct regs *r);
 extern void trapret(void);
 extern void gdt_flush(void *ptr);
-extern void switch_context(u32 *old_sp, u32 new_sp);
+extern void switch_context(uptr *old_sp, uptr new_sp);
 
 /* mem.c */
 void mem_init(u32 ram_bytes);
@@ -162,18 +162,18 @@ void *kmalloc(u32 n);
 void *kzalloc(u32 n);
 void kfree(void *p);
 void heap_stats(u32 *total, u32 *free);
-u32 *vmm_new_pd(void);
-int vmm_map(u32 *pd, u32 va, u32 pa, u32 flags);
-u32 vmm_get_pte(u32 *pd, u32 va);
-void vmm_unmap(u32 *pd, u32 va);
-u32 *vmm_clone_pd(u32 *src);
-void vmm_free_pd(u32 *pd);
-void vmm_switch(u32 *pd);
-u32 vmm_count_pages(u32 *pd);
-int vmm_alloc_page(u32 *pd, u32 va);
-int copy_to_space(u32 *pd, u32 va, const void *src, u32 len);
-int user_ok(u32 addr, u32 len);
-extern u32 *kernel_pd;
+u64 *vmm_new_pd(void);                                  /* an address space is a PML4 */
+int vmm_map(u64 *pd, u32 va, u32 pa, u64 flags);
+u64 vmm_get_pte(u64 *pd, u32 va);
+void vmm_unmap(u64 *pd, u32 va);
+u64 *vmm_clone_pd(u64 *src);
+void vmm_free_pd(u64 *pd);
+void vmm_switch(u64 *pd);
+u32 vmm_count_pages(u64 *pd);
+int vmm_alloc_page(u64 *pd, u32 va);
+int copy_to_space(u64 *pd, u32 va, const void *src, u32 len);
+int user_ok(u64 addr, u32 len);
+extern u64 *kernel_pd;
 
 /* fs.c */
 void fs_init(void);

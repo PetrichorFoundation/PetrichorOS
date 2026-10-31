@@ -89,7 +89,7 @@ int vformat(fmt_out out, void *ctx, const char *fmt, va_list ap)
             out('0', ctx);
             out('x', ctx);
             count += 2;
-            len = utoa(tmp, (u32)va_arg(ap, void *), 16, 0);
+            len = utoa(tmp, (u32)(uptr)va_arg(ap, void *), 16, 0);
             numeric = 1;
             zero = 1;
             left = 0;

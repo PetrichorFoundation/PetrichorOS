@@ -36,11 +36,11 @@ static struct proc *proc_alloc(void)
         u8 *sp = p->kstack + KSTACK_SIZE;
         sp -= sizeof(struct regs);
         p->tf = (struct regs *)sp;
-        sp -= 4;
-        *(u32 *)sp = (u32)trapret;
-        sp -= 16;                       /* edi, esi, ebx, ebp popped by switch_context */
-        memset(sp, 0, 16);
-        p->ctx_sp = (u32)sp;
+        sp -= 8;
+        *(u64 *)sp = (u64)(uptr)trapret;
+        sp -= 48;                       /* r15, r14, r13, r12, rbx, rbp popped by switch_context */
+        memset(sp, 0, 48);
+        p->ctx_sp = (uptr)sp;
         return p;
     }
     return NULL;
@@ -104,7 +104,7 @@ void schedule(void)
     next->state = PS_RUNNING;
     cur = next;
     if (next->kstack)
-        tss_set_kstack((u32)next->kstack + KSTACK_SIZE);
+        tss_set_kstack((uptr)next->kstack + KSTACK_SIZE);
     vmm_switch(next->pd ? next->pd : kernel_pd);
     switch_context(&old->ctx_sp, next->ctx_sp);
 }
@@ -187,7 +187,7 @@ int proc_fork(struct regs *r)
     np->ppid = cur->pid;
     np->pgid = cur->pgid;
     *np->tf = *r;
-    np->tf->eax = 0;
+    np->tf->rax = 0;
     np->state = PS_RUNNABLE;
     return np->pid;
 }

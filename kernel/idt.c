@@ -3,27 +3,30 @@
 
 struct idt_entry {
     u16 off_lo, sel;
-    u8 zero, flags;
-    u16 off_hi;
+    u8 ist, flags;
+    u16 off_mid;
+    u32 off_hi, zero;
 } __attribute__((packed));
 
 struct idt_ptr {
     u16 limit;
-    u32 base;
+    u64 base;
 } __attribute__((packed));
 
-extern u32 isr_table[];
+extern u64 isr_table[];
 extern void isr128(void);
 
 static struct idt_entry idt[256];
 
-static void set_gate(int n, u32 handler, u8 flags)
+static void set_gate(int n, u64 handler, u8 flags)
 {
     idt[n].off_lo = handler & 0xFFFF;
     idt[n].sel = 0x08;
-    idt[n].zero = 0;
+    idt[n].ist = 0;
     idt[n].flags = flags;
-    idt[n].off_hi = handler >> 16;
+    idt[n].off_mid = (handler >> 16) & 0xFFFF;
+    idt[n].off_hi = handler >> 32;
+    idt[n].zero = 0;
 }
 
 static void pic_init(void)
@@ -46,9 +49,9 @@ void idt_init(void)
 {
     for (int i = 0; i < 48; i++)
         set_gate(i, isr_table[i], 0x8E);
-    set_gate(128, (u32)isr128, 0xEE);   /* int 0x80: callable from ring 3 */
+    set_gate(128, (u64)(uptr)isr128, 0xEE);   /* int 0x80: callable from ring 3 */
 
-    struct idt_ptr ip = {sizeof idt - 1, (u32)idt};
+    struct idt_ptr ip = {sizeof idt - 1, (u64)(uptr)idt};
     __asm__ volatile("lidt %0" : : "m"(ip));
     pic_init();
 }
@@ -75,8 +78,9 @@ static void exception(struct regs *r)
     const char *name = r->int_no < 20 ? exc_names[r->int_no] : "unknown exception";
     if ((r->cs & 3) == 3 && r->int_no == 14) {                  /* the stack grows downwards on demand */
         u32 lo = USER_TOP - USER_STACK_MAX * PAGE_SIZE, hi = USER_TOP - USER_STACK_PAGES * PAGE_SIZE;
-        u32 a = read_cr2() & ~0xFFFu;
-        if (a >= lo && a < hi) {
+        u64 cr2 = read_cr2();
+        u32 a = (u32)cr2 & ~0xFFFu;
+        if (cr2 < USER_TOP && a >= lo && a < hi) {
             u32 va;
             for (va = a; va < hi; va += PAGE_SIZE)
                 if (vmm_alloc_page(cur->pd, va) < 0)
@@ -86,13 +90,13 @@ static void exception(struct regs *r)
         }
     }
     if ((r->cs & 3) == 3) {
-        kprintf("[pid %d %s] killed: %s at eip=%p", cur->pid, cur->name, name, r->eip);
+        kprintf("[pid %d %s] killed: %s at rip=%p", cur->pid, cur->name, name, (void *)r->rip);
         if (r->int_no == 14)
-            kprintf(" (address %p)", read_cr2());
+            kprintf(" (address %p)", (void *)read_cr2());
         kprintf("\n");
         proc_exit(r->int_no == 14 ? 139 : 134);
     }
-    panic("%s in kernel at eip=%p err=%x cr2=%p", name, r->eip, r->err_code, read_cr2());
+    panic("%s in kernel at rip=%p err=%x cr2=%p", name, (void *)r->rip, (u32)r->err_code, (void *)read_cr2());
 }
 
 static void irq(struct regs *r)
@@ -116,7 +120,7 @@ static void irq(struct regs *r)
 void trap_handler(struct regs *r)
 {
     if (r->int_no == 128)
-        r->eax = syscall_dispatch(r);
+        r->rax = (u64)(i64)syscall_dispatch(r);
     else if (r->int_no >= 32 && r->int_no < 48)
         irq(r);
     else

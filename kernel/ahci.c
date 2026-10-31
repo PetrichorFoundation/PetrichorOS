@@ -50,7 +50,7 @@ static int command(struct port *p, u8 cmd, u32 lba, u32 count, void *buf, u32 by
     u32 *hdr = (u32 *)p->clb;
     hdr[0] = 5 | (write ? 1u << 6 : 0) | (1u << 16);           /* CFIS = 5 dwords, one PRD entry */
     hdr[1] = 0;
-    hdr[2] = (u32)p->ctba;
+    hdr[2] = (u32)(uptr)p->ctba;
     hdr[3] = 0;
 
     u8 *ct = p->ctba;
@@ -66,7 +66,7 @@ static int command(struct port *p, u8 cmd, u32 lba, u32 count, void *buf, u32 by
     ct[12] = count;
     ct[13] = count >> 8;
     u32 *prd = (u32 *)(ct + 0x80);
-    prd[0] = (u32)buf;
+    prd[0] = (u32)(uptr)buf;
     prd[1] = 0;
     prd[2] = 0;
     prd[3] = bytes - 1;
@@ -121,9 +121,9 @@ static int setup_port(volatile u32 *hba, int port)
     p->ctba = kalloc_aligned(256, 128);
     if (!p->clb || !fis || !p->ctba)
         return 0;
-    wr(p, P_CLB, (u32)p->clb);
+    wr(p, P_CLB, (u32)(uptr)p->clb);
     wr(p, P_CLBU, 0);
-    wr(p, P_FB, (u32)fis);
+    wr(p, P_FB, (u32)(uptr)fis);
     wr(p, P_FBU, 0);
     wr(p, P_SERR, 0xFFFFFFFF);
     wr(p, P_IS, 0xFFFFFFFF);

@@ -176,7 +176,7 @@ static const char *const cursor_art[19] = {
 
 static void cursor_show(void)
 {
-    u32 *px = (u32 *)fb.addr;
+    u32 *px = (u32 *)(uptr)fb.addr;
     for (int y = 0; y < 19; y++) {
         for (int x = 0; x < 12; x++) {
             char c = cursor_art[y][x];
@@ -190,7 +190,7 @@ static void cursor_show(void)
 
 static void present(struct rect r)
 {
-    u32 *px = (u32 *)fb.addr;
+    u32 *px = (u32 *)(uptr)fb.addr;
     for (int y = r.y; y < r.y + r.h; y++)
         memcpy(px + y * SCREEN_W + r.x, back + y * SCREEN_W + r.x, r.w * 4);
 }
@@ -1184,7 +1184,7 @@ static void about_draw(struct win *w, struct rect c)
 {
     gfx_vgrad(c.x, c.y, c.w, 92, walls[g_wall].top, walls[g_wall].bottom);
     gfx_text_scaled(c.x + 20, c.y + 18, "Petrichor", C_WHITE, 3);
-    gfx_text(c.x + 22, c.y + 66, "a from-scratch Unix for i386", RGB(0xa8, 0xd8, 0xe8));
+    gfx_text(c.x + 22, c.y + 66, "a from-scratch 64-bit Unix", RGB(0xa8, 0xd8, 0xe8));
 
     struct meminfo mi;
     struct netinfo ni;

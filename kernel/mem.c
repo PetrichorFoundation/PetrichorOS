@@ -13,7 +13,7 @@ static void mmio_init(void);
 
 static u32 bitmap[(MAX_RAM / PAGE_SIZE) / 32];
 static u32 total_frames, nfree, hint;
-u32 *kernel_pd;
+u64 *kernel_pd;
 
 /* ---------------- physical frame allocator ---------------- */
 
@@ -35,7 +35,7 @@ u32 pmm_alloc(void)
                     nfree--;
                     hint = f;
                     u32 pa = f * PAGE_SIZE;
-                    memset((void *)pa, 0, PAGE_SIZE);
+                    memset((void *)(uptr)pa, 0, PAGE_SIZE);
                     return pa;
                 }
             }
@@ -67,13 +67,13 @@ struct hblock {
     u32 size;
     u32 free;
     struct hblock *prev, *next;
-};
+} __attribute__((aligned(16)));                  /* payloads stay 16-byte aligned */
 
 static struct hblock *heap_head;
 
 void heap_init(u32 start, u32 size)
 {
-    heap_head = (struct hblock *)start;
+    heap_head = (struct hblock *)(uptr)start;
     heap_head->size = size - sizeof(struct hblock);
     heap_head->free = 1;
     heap_head->prev = heap_head->next = NULL;
@@ -142,56 +142,97 @@ void heap_stats(u32 *total, u32 *free)
     }
 }
 
-/* ---------------- paging ---------------- */
+/* ---------------- paging ----------------
+ *
+ * Four-level (long mode) tables, but the layout is the same as it always was, and everything the kernel
+ * touches lives in the low 4 GiB:
+ *   PML4[0] -> PDPT:  [0, 1 GiB)  identity-mapped RAM, supervisor only, 2 MiB pages   (shared by all spaces)
+ *                     [1, 3 GiB)  user memory, private page directories and tables
+ *                     [3, 4 GiB)  the device-memory window                              (shared by all spaces)
+ * A process address space is its own PML4 + PDPT; the shared entries point at the kernel's page directories. */
 
-u32 *vmm_new_pd(void)
+#define IDX_PML4(va) (((u64)(va) >> 39) & 511)
+#define IDX_PDPT(va) (((u64)(va) >> 30) & 511)
+#define IDX_PD(va)   (((u64)(va) >> 21) & 511)
+#define IDX_PT(va)   (((u64)(va) >> 12) & 511)
+#define PADDR(e)     ((e) & 0x000FFFFFFFFFF000ull)
+
+static u64 *kernel_pdpt, *kernel_pd0, *kernel_pd3;      /* kernel_pd (the PML4) is declared above */
+
+u64 *vmm_new_pd(void)
 {
-    u32 *pd = (u32 *)pmm_alloc();
-    if (!pd)
+    u64 *pml4 = (u64 *)(uptr)pmm_alloc();
+    u64 *pdpt = (u64 *)(uptr)pmm_alloc();
+    if (!pml4 || !pdpt) {
+        pmm_free((u32)(uptr)pml4);
+        pmm_free((u32)(uptr)pdpt);
         return NULL;
-    /* Share the kernel's page tables: identity-mapped RAM below the user range, and the
-     * device-memory window above it. */
-    for (int i = 0; i < 1024; i++)
-        if (i < 256 || i >= 768)
-            pd[i] = kernel_pd[i];
-    return pd;
+    }
+    pml4[0] = (u64)(uptr)pdpt | PTE_P | PTE_RW | PTE_US;
+    pdpt[0] = kernel_pdpt[0];
+    pdpt[3] = kernel_pdpt[3];
+    return pml4;
 }
 
-int vmm_map(u32 *pd, u32 va, u32 pa, u32 flags)
+/* The page table covering va, optionally creating the levels above it (user addresses only). */
+static u64 *walk(u64 *pml4, u32 va, int create)
 {
-    u32 di = va >> 22;
-    if (!(pd[di] & PTE_P)) {
+    if (!(pml4[0] & PTE_P))
+        return NULL;
+    if (IDX_PDPT(va) != 1 && IDX_PDPT(va) != 2)         /* only [1 GiB, 3 GiB) holds user pages */
+        return NULL;
+    u64 *pdpt = (u64 *)(uptr)PADDR(pml4[0]);
+    u64 *e = &pdpt[IDX_PDPT(va)];
+    if (!(*e & PTE_P)) {
+        if (!create)
+            return NULL;
+        u32 pd = pmm_alloc();
+        if (!pd)
+            return NULL;
+        *e = pd | PTE_P | PTE_RW | PTE_US;
+    }
+    u64 *pd = (u64 *)(uptr)PADDR(*e);
+    e = &pd[IDX_PD(va)];
+    if (!(*e & PTE_P)) {
+        if (!create)
+            return NULL;
         u32 pt = pmm_alloc();
         if (!pt)
-            return -1;
-        pd[di] = pt | PTE_P | PTE_RW | PTE_US;
+            return NULL;
+        *e = pt | PTE_P | PTE_RW | PTE_US;
     }
-    u32 *pt = (u32 *)(pd[di] & ~0xFFFu);
-    pt[(va >> 12) & 0x3FF] = (pa & ~0xFFFu) | flags | PTE_P;
+    return (u64 *)(uptr)PADDR(*e);
+}
+
+int vmm_map(u64 *pd, u32 va, u32 pa, u64 flags)
+{
+    u64 *pt = walk(pd, va, 1);
+    if (!pt)
+        return -1;
+    pt[IDX_PT(va)] = (u64)(pa & ~0xFFFu) | flags | PTE_P;
     return 0;
 }
 
-u32 vmm_get_pte(u32 *pd, u32 va)
+u64 vmm_get_pte(u64 *pd, u32 va)
 {
-    u32 de = pd[va >> 22];
-    if (!(de & PTE_P))
-        return 0;
-    return ((u32 *)(de & ~0xFFFu))[(va >> 12) & 0x3FF];
+    u64 *pt = walk(pd, va, 0);
+    return pt ? pt[IDX_PT(va)] : 0;
 }
 
-void vmm_unmap(u32 *pd, u32 va)
+void vmm_unmap(u64 *pd, u32 va)
 {
-    u32 pte = vmm_get_pte(pd, va);
-    if (!(pte & PTE_P))
+    u64 *pt = walk(pd, va, 0);
+    if (!pt || !(pt[IDX_PT(va)] & PTE_P))
         return;
+    u64 pte = pt[IDX_PT(va)];
     if (!(pte & PTE_SHARED))
-        pmm_free(pte & ~0xFFFu);
-    ((u32 *)(pd[va >> 22] & ~0xFFFu))[(va >> 12) & 0x3FF] = 0;
-    __asm__ volatile("invlpg (%0)" : : "r"(va) : "memory");
+        pmm_free((u32)PADDR(pte));
+    pt[IDX_PT(va)] = 0;
+    __asm__ volatile("invlpg (%0)" : : "r"((uptr)va) : "memory");
 }
 
 /* Maps a fresh zeroed user page at va unless one is already there. */
-int vmm_alloc_page(u32 *pd, u32 va)
+int vmm_alloc_page(u64 *pd, u32 va)
 {
     if (vmm_get_pte(pd, va) & PTE_P)
         return 0;
@@ -205,84 +246,106 @@ int vmm_alloc_page(u32 *pd, u32 va)
     return 0;
 }
 
-u32 *vmm_clone_pd(u32 *src)
+u64 *vmm_clone_pd(u64 *src)
 {
-    u32 *pd = vmm_new_pd();
+    u64 *pd = vmm_new_pd();
     if (!pd)
         return NULL;
-    for (u32 di = USER_BASE >> 22; di < USER_TOP >> 22; di++) {
-        if (!(src[di] & PTE_P))
+    u64 *spdpt = (u64 *)(uptr)PADDR(src[0]);
+    for (int a = 1; a <= 2; a++) {
+        if (!(spdpt[a] & PTE_P))
             continue;
-        u32 *spt = (u32 *)(src[di] & ~0xFFFu);
-        for (u32 ti = 0; ti < 1024; ti++) {
-            if (!(spt[ti] & PTE_P))
+        u64 *spdir = (u64 *)(uptr)PADDR(spdpt[a]);
+        for (int b = 0; b < 512; b++) {
+            if (!(spdir[b] & PTE_P))
                 continue;
-            u32 va = (di << 22) | (ti << 12);
-            if (spt[ti] & PTE_SHARED) {         /* device memory: child shares the mapping */
-                if (vmm_map(pd, va, spt[ti] & ~0xFFFu, spt[ti] & 0xFFFu & ~PTE_P) < 0) {
+            u64 *spt = (u64 *)(uptr)PADDR(spdir[b]);
+            for (int c = 0; c < 512; c++) {
+                u64 pte = spt[c];
+                if (!(pte & PTE_P))
+                    continue;
+                u32 va = (u32)(((u64)a << 30) | ((u64)b << 21) | ((u64)c << 12));
+                u64 fl = pte & 0xFFFull & ~PTE_P;
+                if (pte & PTE_SHARED) {                 /* device memory: child shares the mapping */
+                    if (vmm_map(pd, va, (u32)PADDR(pte), fl) < 0) {
+                        vmm_free_pd(pd);
+                        return NULL;
+                    }
+                    continue;
+                }
+                u32 f = pmm_alloc();
+                if (!f || vmm_map(pd, va, f, fl) < 0) {
+                    pmm_free(f);
                     vmm_free_pd(pd);
                     return NULL;
                 }
-                continue;
+                memcpy((void *)(uptr)f, (void *)(uptr)PADDR(pte), PAGE_SIZE);
             }
-            u32 f = pmm_alloc();
-            if (!f || vmm_map(pd, va, f, spt[ti] & 0xFFFu & ~PTE_P) < 0) {
-                pmm_free(f);
-                vmm_free_pd(pd);
-                return NULL;
-            }
-            memcpy((void *)f, (void *)(spt[ti] & ~0xFFFu), PAGE_SIZE);
         }
     }
     return pd;
 }
 
-void vmm_free_pd(u32 *pd)
+void vmm_free_pd(u64 *pd)
 {
-    for (u32 di = USER_BASE >> 22; di < USER_TOP >> 22; di++) {
-        if (!(pd[di] & PTE_P))
+    u64 *pdpt = (u64 *)(uptr)PADDR(pd[0]);
+    for (int a = 1; a <= 2; a++) {
+        if (!(pdpt[a] & PTE_P))
             continue;
-        u32 *pt = (u32 *)(pd[di] & ~0xFFFu);
-        for (u32 ti = 0; ti < 1024; ti++)
-            if ((pt[ti] & PTE_P) && !(pt[ti] & PTE_SHARED))
-                pmm_free(pt[ti] & ~0xFFFu);
-        pmm_free((u32)pt);
+        u64 *pdir = (u64 *)(uptr)PADDR(pdpt[a]);
+        for (int b = 0; b < 512; b++) {
+            if (!(pdir[b] & PTE_P))
+                continue;
+            u64 *pt = (u64 *)(uptr)PADDR(pdir[b]);
+            for (int c = 0; c < 512; c++)
+                if ((pt[c] & PTE_P) && !(pt[c] & PTE_SHARED))
+                    pmm_free((u32)PADDR(pt[c]));
+            pmm_free((u32)(uptr)pt);
+        }
+        pmm_free((u32)(uptr)pdir);
     }
-    pmm_free((u32)pd);
+    pmm_free((u32)(uptr)pdpt);
+    pmm_free((u32)(uptr)pd);
 }
 
-u32 vmm_count_pages(u32 *pd)
+u32 vmm_count_pages(u64 *pd)
 {
     u32 n = 0;
-    for (u32 di = USER_BASE >> 22; di < USER_TOP >> 22; di++) {
-        if (!(pd[di] & PTE_P))
+    u64 *pdpt = (u64 *)(uptr)PADDR(pd[0]);
+    for (int a = 1; a <= 2; a++) {
+        if (!(pdpt[a] & PTE_P))
             continue;
-        u32 *pt = (u32 *)(pd[di] & ~0xFFFu);
-        for (u32 ti = 0; ti < 1024; ti++)
-            if ((pt[ti] & PTE_P) && !(pt[ti] & PTE_SHARED))
-                n++;
+        u64 *pdir = (u64 *)(uptr)PADDR(pdpt[a]);
+        for (int b = 0; b < 512; b++) {
+            if (!(pdir[b] & PTE_P))
+                continue;
+            u64 *pt = (u64 *)(uptr)PADDR(pdir[b]);
+            for (int c = 0; c < 512; c++)
+                if ((pt[c] & PTE_P) && !(pt[c] & PTE_SHARED))
+                    n++;
+        }
     }
     return n;
 }
 
-void vmm_switch(u32 *pd)
+void vmm_switch(u64 *pd)
 {
-    __asm__ volatile("mov %0, %%cr3" : : "r"(pd) : "memory");
+    __asm__ volatile("mov %0, %%cr3" : : "r"((u64)(uptr)pd) : "memory");
 }
 
 /* Copies into another address space through the identity map. */
-int copy_to_space(u32 *pd, u32 va, const void *src, u32 len)
+int copy_to_space(u64 *pd, u32 va, const void *src, u32 len)
 {
     const u8 *s = src;
     while (len) {
-        u32 pte = vmm_get_pte(pd, va);
+        u64 pte = vmm_get_pte(pd, va);
         if (!(pte & PTE_P))
             return -1;
         u32 off = va & 0xFFF;
         u32 n = PAGE_SIZE - off;
         if (n > len)
             n = len;
-        memcpy((void *)((pte & ~0xFFFu) + off), s, n);
+        memcpy((void *)(uptr)(PADDR(pte) + off), s, n);
         va += n;
         s += n;
         len -= n;
@@ -291,14 +354,14 @@ int copy_to_space(u32 *pd, u32 va, const void *src, u32 len)
 }
 
 /* Is [addr, addr+len) entirely mapped user memory in the current process? */
-int user_ok(u32 addr, u32 len)
+int user_ok(u64 addr, u32 len)
 {
     if (len == 0)
         return 1;
     if (addr < USER_BASE || addr >= USER_TOP || len > USER_TOP - addr)
         return 0;
-    for (u32 va = addr & ~0xFFFu; va < addr + len; va += PAGE_SIZE) {
-        u32 pte = vmm_get_pte(cur->pd, va);
+    for (u64 va = addr & ~0xFFFull; va < addr + len; va += PAGE_SIZE) {
+        u64 pte = vmm_get_pte(cur->pd, (u32)va);
         if ((pte & (PTE_P | PTE_US)) != (PTE_P | PTE_US))
             return 0;
     }
@@ -314,7 +377,7 @@ void mem_init(u32 ram_bytes)
     u32 heap_size = ram_bytes / 4;
     if (heap_size < (8u << 20)) heap_size = 8u << 20;
     if (heap_size > (96u << 20)) heap_size = 96u << 20;
-    u32 heap_start = ((u32)_end + 4095) & ~4095u;
+    u32 heap_start = ((u32)(uptr)_end + 4095) & ~4095u;
     u32 low_free_start = 0, low_free_end = 0;
     if (bootinfo.kimg && bootinfo.kimg + bootinfo.kimg_size > heap_start) {
         low_free_start = heap_start;                          /* the gap before the kernel copy is ordinary RAM */
@@ -338,26 +401,23 @@ void mem_init(u32 ram_bytes)
     }
     hint = low_free_start ? low_free_start / PAGE_SIZE : heap_end / PAGE_SIZE;
 
-    /* Identity-map all RAM, supervisor only, in 4 KiB pages. */
-    kernel_pd = (u32 *)pmm_alloc();
-    u32 npde = (ram_bytes + (4u << 20) - 1) >> 22;
-    for (u32 i = 0; i < npde; i++) {
-        u32 *pt = (u32 *)pmm_alloc();
-        if (!pt)
-            panic("out of memory building page tables");
-        for (u32 j = 0; j < 1024; j++)
-            pt[j] = ((i << 22) | (j << 12)) | PTE_P | PTE_RW;
-        kernel_pd[i] = (u32)pt | PTE_P | PTE_RW;
-    }
+    /* Identity-map all RAM (supervisor only) in 2 MiB pages. */
+    kernel_pd = (u64 *)(uptr)pmm_alloc();
+    kernel_pdpt = (u64 *)(uptr)pmm_alloc();
+    kernel_pd0 = (u64 *)(uptr)pmm_alloc();
+    kernel_pd3 = (u64 *)(uptr)pmm_alloc();
+    if (!kernel_pd || !kernel_pdpt || !kernel_pd0 || !kernel_pd3)
+        panic("out of memory building page tables");
+    u32 npde = (ram_bytes + (2u << 20) - 1) >> 21;
+    for (u32 i = 0; i < npde && i < 512; i++)
+        kernel_pd0[i] = ((u64)i << 21) | PTE_P | PTE_RW | PTE_PS;
+    kernel_pdpt[0] = (u64)(uptr)kernel_pd0 | PTE_P | PTE_RW | PTE_US;
+    kernel_pdpt[3] = (u64)(uptr)kernel_pd3 | PTE_P | PTE_RW | PTE_US;
+    kernel_pd[0] = (u64)(uptr)kernel_pdpt | PTE_P | PTE_RW | PTE_US;
     mmio_init();
-    __asm__ volatile(
-        "mov %0, %%cr3\n"
-        "mov %%cr0, %%eax\n"
-        "or $0x80000000, %%eax\n"
-        "mov %%eax, %%cr0\n"
-        : : "r"(kernel_pd) : "eax", "memory");
+    vmm_switch(kernel_pd);                                    /* paging is already on: the bootloader stub enabled it */
 
-    kprintf("[mem ] %u MiB RAM, %u MiB kernel heap, paging on\n",
+    kprintf("[mem ] %u MiB RAM, %u MiB kernel heap, paging on (64-bit)\n",
             ram_bytes >> 20, (heap_end - heap_start) >> 20);
 }
 
@@ -366,15 +426,15 @@ void mem_init(u32 ram_bytes)
 #define MMIO_SIZE (64u << 20)
 static u32 mmio_next = MMIO_BASE;
 
-/* Every address space copies the kernel's top-level table when it is created, so a page table
- * added to it later would be invisible to existing processes.  Create the window's tables up front. */
+/* Every address space shares the kernel's page directory for [3 GiB, 4 GiB), so tables added to it later are
+ * visible everywhere.  The window's page tables are created up front. */
 static void mmio_init(void)
 {
-    for (u32 va = MMIO_BASE; va < MMIO_BASE + MMIO_SIZE; va += 4u << 20) {
+    for (u32 va = MMIO_BASE; va < MMIO_BASE + MMIO_SIZE; va += 2u << 20) {
         u32 pt = pmm_alloc();
         if (!pt)
             panic("out of memory for the device-memory window");
-        kernel_pd[va >> 22] = pt | PTE_P | PTE_RW;
+        kernel_pd3[IDX_PD(va)] = pt | PTE_P | PTE_RW;
     }
 }
 
@@ -387,15 +447,16 @@ void *mmio_map(u32 phys, u32 size)
     u32 va = mmio_next;
     mmio_next += pages * PAGE_SIZE;
     for (u32 i = 0; i < pages; i++) {
-        u32 v = va + i * PAGE_SIZE, di = v >> 22;
-        ((u32 *)(kernel_pd[di] & ~0xFFFu))[(v >> 12) & 0x3FF] = (base + i * PAGE_SIZE) | PTE_P | PTE_RW | 0x18;  /* PCD|PWT */
-        __asm__ volatile("invlpg (%0)" : : "r"(v) : "memory");
+        u32 v = va + i * PAGE_SIZE;
+        u64 *pt = (u64 *)(uptr)PADDR(kernel_pd3[IDX_PD(v)]);
+        pt[IDX_PT(v)] = (u64)(base + i * PAGE_SIZE) | PTE_P | PTE_RW | 0x18;  /* PCD|PWT */
+        __asm__ volatile("invlpg (%0)" : : "r"((uptr)v) : "memory");
     }
-    return (void *)(va + off);
+    return (void *)(uptr)(va + off);
 }
 
 void *kalloc_aligned(u32 size, u32 align)
 {
     u8 *p = kzalloc(size + align);
-    return p ? (void *)(((u32)p + align - 1) & ~(align - 1)) : NULL;
+    return p ? (void *)(((uptr)p + align - 1) & ~(uptr)(align - 1)) : NULL;
 }

@@ -58,7 +58,7 @@ int nic_init(void)
     rx_buf = kzalloc(RX_BUF);
     if (!rx_buf)
         return -ENOMEM;
-    outl(io + REG_RBSTART, (u32)rx_buf);
+    outl(io + REG_RBSTART, (u32)(uptr)rx_buf);
     outw(io + REG_IMR, ISR_ROK | ISR_TOK);
     outl(io + REG_RCR, 0x0F | (1 << 7));                /* accept all/multicast/broadcast/mine; WRAP */
     outb(io + REG_CMD, CMD_RE | CMD_TE);
@@ -81,7 +81,7 @@ int nic_send(const u8 *frame, u32 len)
     u32 n = len < 60 ? 60 : len;                        /* pad runt frames */
     if (n > len)
         memset(tx_buf[d] + len, 0, n - len);
-    outl(io + REG_TSAD + 4 * d, (u32)tx_buf[d]);
+    outl(io + REG_TSAD + 4 * d, (u32)(uptr)tx_buf[d]);
     outl(io + REG_TSD + 4 * d, n);                      /* writing the size starts DMA */
     tx_used[d] = 1;
     tx_cur = (d + 1) & 3;

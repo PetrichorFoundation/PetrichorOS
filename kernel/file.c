@@ -157,7 +157,7 @@ static int kimg_read(struct file *f, void *dst, u32 n)
         return 0;
     if (n > bootinfo.kimg_size - f->off)
         n = bootinfo.kimg_size - f->off;
-    memcpy(dst, (const void *)(bootinfo.kimg + f->off), n);
+    memcpy(dst, (const void *)(uptr)(bootinfo.kimg + f->off), n);
     f->off += n;
     return n;
 }

@@ -1,23 +1,14 @@
-# System call stubs.  Arguments are loaded into ebx, ecx, edx, esi, edi;
-# the result (or -errno) comes back in eax.
+# System call stubs.  The C calling convention already puts the arguments in rdi, rsi, rdx, rcx, r8;
+# the kernel wants the fourth in r10 (rcx is destroyed by `syscall`-style ABIs).  The number goes in
+# rax, the result (or -errno) comes back in rax.
 #include "abi.h"
 
 .macro SYSCALL name, num
 .global \name
 \name:
-    push %ebx
-    push %esi
-    push %edi
-    mov 16(%esp), %ebx
-    mov 20(%esp), %ecx
-    mov 24(%esp), %edx
-    mov 28(%esp), %esi
-    mov 32(%esp), %edi
+    mov %rcx, %r10
     mov $\num, %eax
     int $0x80
-    pop %edi
-    pop %esi
-    pop %ebx
     ret
 .endm
 
