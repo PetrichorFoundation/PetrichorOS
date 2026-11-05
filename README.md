@@ -279,3 +279,8 @@ Natural next steps: TLS 1.3, JavaScript, SVG/WebP and positioned elements for th
 RTL8168), AHCI/NVMe interrupts and multiple queues, selectable display modes, partitioning and
 dual-boot in the installer, a window-server protocol, DHCP and `listen`/`accept`, a journal, signed
 packages, real signals, a 64-bit port.
+
+## License
+
+Petrichor OS is released under the [MIT License](LICENSE), except for the 8x16 bitmap font in
+`lib/font8x16.h`, which is the standard VGA text-mode font (LGPL-licensed; see above).
