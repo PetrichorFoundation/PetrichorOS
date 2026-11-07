@@ -60,6 +60,7 @@ $B/user/out/%: $B/user/bin/%.o $(ULIB) user/user.ld
 	@mkdir -p $(dir $@)
 	$(LD) $(LDFLAGS) -T user/user.ld -o $@ $(filter %.o,$^)
 $(addprefix $B/user/out/,$(TLSBINS)): $(TLSLIB)
+$B/user/out/pinstall: $B/lib/efiimg.o
 
 # ---- packages and the package repository ----
 # packages/<name>/package (VERSION, DEPS, DESC), src/*.c -> bin/<prog>, files/ copied as-is.
@@ -110,15 +111,15 @@ $B/BOOTX64.EFI: boot/uefi.c
 	      -fno-builtin -O2 -Wall -c $< -o $B/boot/uefi.o
 	$(LLDLINK) /subsystem:efi_application /entry:efi_main /nodefaultlib /out:$@ $B/boot/uefi.o
 
-$B/mkefi: tools/mkefi.c
+$B/mkefi: tools/mkefi.c lib/efiimg.c lib/efiimg.h include/ptypes.h
 	@mkdir -p $B
-	$(HOSTCC) -O2 -o $@ $<
+	$(HOSTCC) -O2 -Ilib -Iinclude -o $@ tools/mkefi.c lib/efiimg.c
 
 $B/esp.img: $B/mkefi $B/BOOTX64.EFI $B/kernel.bin
 	$B/mkefi fat $@ $B/BOOTX64.EFI $B/kernel.bin
 
 $B/uefi.img: $B/mkefi $B/esp.img
-	$B/mkefi gpt $@ $B/esp.img
+	$B/mkefi gpt $@ $B/esp.img 16
 
 $B/kernel.bin: $(KOBJ) kernel/kernel.ld
 	$(LD) $(LDFLAGS) -T kernel/kernel.ld --oformat binary -o $@ $(KOBJ)
@@ -148,12 +149,12 @@ $B/mkinitrd: tools/mkinitrd.c
 
 ROOTFILES := $(shell find rootfs -type f 2>/dev/null)
 
-$B/initrd.img: $B/mkinitrd $(UEXE) $(ROOTFILES) $B/boot/stage1.bin $B/boot/stage2.bin
+$B/initrd.img: $B/mkinitrd $(UEXE) $(ROOTFILES) $B/boot/stage1.bin $B/boot/stage2.bin $B/BOOTX64.EFI
 	rm -rf $B/root
 	mkdir -p $B/root/bin $B/root/dev $B/root/tmp $B/root/home $B/root/root
 	cp -R rootfs/. $B/root/
 	mkdir -p $B/root/boot
-	cp $B/boot/stage1.bin $B/boot/stage2.bin $B/root/boot/
+	cp $B/boot/stage1.bin $B/boot/stage2.bin $B/BOOTX64.EFI $B/root/boot/
 	cp $(UEXE) $B/root/bin/
 	$B/mkinitrd $@ $B/root
 

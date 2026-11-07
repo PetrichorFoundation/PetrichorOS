@@ -12,6 +12,7 @@
  * it booted from.  The data partition is cleared so the kernel formats it on first boot, and the
  * copy is read back and compared before we say it worked. */
 #include <ulib.h>
+#include "efiimg.h"
 
 #define BOOT_SECTORS 4096                  /* boot region: LBA 0 .. 4095 */
 #define KERNEL_LBA   16
@@ -89,6 +90,110 @@ static const char *probe(const char *name, char *out, int outsz)
     return out;
 }
 
+/* ---- UEFI installs: a GPT disk with an EFI System Partition (loader + kernel) and Petrichor's data partition ---- */
+
+#define ESP_FIRST 2048u
+#define UEFI_MIN_SECTORS (2048 * 40)             /* 40 MiB */
+
+static int booted_uefi(void)
+{
+    char cmd[128] = "";
+    slurp("/etc/cmdline", cmd, sizeof cmd - 1);
+    return strstr(cmd, "uefi") != NULL;
+}
+
+static int install_uefi(const char *name, u32 disk_sectors)
+{
+    if (disk_sectors < UEFI_MIN_SECTORS)
+        return fail("the disk is too small for a UEFI install (need at least 40 MiB)", 0);
+    report(2, "Preparing the UEFI install image");
+    int kfd = open("/dev/kernelimg", O_RDONLY);
+    struct stat kst;
+    if (kfd < 0 || fstat(kfd, &kst) < 0 || kst.size == 0)
+        return fail("no kernel image is available to install", 0);
+    u8 *kernel = malloc(kst.size);
+    u8 *efi = malloc(256 * 1024);
+    if (!kernel || !efi)
+        return fail("out of memory", 0);
+    if (xfer(kfd, kernel, kst.size, 0) < 0)
+        return fail("cannot read the kernel image", 0);
+    close(kfd);
+    int nefi = slurp("/boot/BOOTX64.EFI", efi, 256 * 1024);
+    if (nefi < 1024 || efi[0] != 'M' || efi[1] != 'Z')
+        return fail("the UEFI loader (BOOTX64.EFI) is missing from the system", 0);
+
+    u32 esp_secs = efi_esp_sectors(nefi, kst.size) + 8192;          /* room for a bigger kernel later */
+    u8 *esp = calloc(esp_secs, 512);
+    if (!esp || efi_build_esp(esp, esp_secs, efi, nefi, kernel, kst.size, ESP_FIRST))
+        return fail("cannot build the boot partition", 0);
+    u32 esp_last = ESP_FIRST + esp_secs - 1, pfs_first = (esp_last + 1 + 2047) & ~2047u;
+    u32 pfs_last = disk_sectors - GPT_TAIL_SECTORS - 1;
+    if (pfs_last < pfs_first + 8192)
+        return fail("the disk is too small for the data partition", 0);
+
+    u8 *head = calloc(GPT_HEAD_SECTORS, 512), *tail = calloc(GPT_TAIL_SECTORS, 512);
+    u8 guid[16];
+    int rf = open("/dev/random", O_RDONLY);
+    read(rf, guid, sizeof guid);
+    close(rf);
+    efi_build_gpt(head, tail, disk_sectors, ESP_FIRST, esp_last, pfs_first, pfs_last, guid);
+
+    report(5, "Opening the target disk");
+    char path[16];
+    snprintf(path, sizeof path, "/dev/%s", name);
+    int dst = open(path, O_RDWR);
+    if (dst < 0)
+        return fail("cannot open the target disk", dst);
+
+    report(8, "Writing the partition table");
+    int e = xfer(dst, head, GPT_HEAD_SECTORS * 512, 1);
+    if (e < 0)
+        return fail("write error on the target disk", e);
+    u32 total = esp_secs * 512, written = 0;
+    lseek(dst, (u32)ESP_FIRST * 512, SEEK_SET);
+    while (written < total) {
+        report(10 + written / (total / 50 + 1), "Writing the boot partition");
+        e = xfer(dst, esp + written, CHUNK, 1);
+        if (e < 0)
+            return fail("write error on the target disk", e);
+        written += CHUNK;
+    }
+    u8 *zero = calloc(1, CHUNK);
+    lseek(dst, (u32)pfs_first * 512, SEEK_SET);
+    report(62, "Preparing the data partition");
+    e = xfer(dst, zero, CHUNK, 1);                                    /* clears the superblock: formatted on first boot */
+    if (e < 0)
+        return fail("write error on the target disk", e);
+    lseek(dst, (disk_sectors - GPT_TAIL_SECTORS) * 512u, SEEK_SET);
+    e = xfer(dst, tail, GPT_TAIL_SECTORS * 512, 1);
+    if (e < 0)
+        return fail("write error on the target disk", e);
+
+    u8 *chk = malloc(CHUNK);
+    if (!chk)
+        return fail("out of memory", 0);
+    lseek(dst, 0, SEEK_SET);
+    for (u32 off = 0; off < GPT_HEAD_SECTORS * 512; off += 512) {     /* verify: the table and the boot partition */
+        if (xfer(dst, chk, 512, 0) < 0 || memcmp(chk, head + off, 512))
+            return fail("verification failed: the partition table does not match", 0);
+    }
+    lseek(dst, (u32)ESP_FIRST * 512, SEEK_SET);
+    for (u32 off = 0; off < total; off += CHUNK) {
+        report(70 + off / (total / 28 + 1), "Verifying the copy");
+        if (xfer(dst, chk, CHUNK, 0) < 0)
+            return fail("read error while verifying", 0);
+        if (memcmp(chk, esp + off, CHUNK))
+            return fail("verification failed: the target disk does not match", 0);
+    }
+    close(dst);
+    report(100, "Finished");
+    if (progress_mode)
+        printf("DONE\n");
+    else
+        printf("\nPetrichor is installed on %s (UEFI).\nShut down, remove the installer medium, and boot from %s.\n", name, name);
+    return 0;
+}
+
 static int install(const char *name)
 {
     struct driveinfo d[MAXDRIVES];
@@ -100,6 +205,8 @@ static int install(const char *name)
         return fail("no such disk", 0);
     if (d[target].boot)
         return fail("that is the disk Petrichor is running from; pick another one", 0);
+    if (booted_uefi())
+        return install_uefi(name, d[target].sectors);
     if (d[target].sectors < MIN_SECTORS)
         return fail("the disk is too small (need at least 3 MiB)", 0);
 

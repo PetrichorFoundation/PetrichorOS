@@ -184,7 +184,7 @@ static u8 memmap[64 * 1024];
 
 /* Usable RAM above 1 MiB as sorted, merged [start, end) ranges (firmware tables and device memory leave holes).
  * Written to out as {count, start0, end0, start1, end1, ...}; returns the highest end, in bytes. */
-static u32 usable_ranges(UINTN map_size, UINTN dsize, u32 *out)
+static u32 usable_ranges(UINTN map_size, UINTN dsize, u32 *out, u64 hole_start, u64 hole_end)
 {
     static u64 start[256], end[256];                          /* static: a big stack frame would need __chkstk */
     int n = 0;
@@ -221,12 +221,21 @@ static u32 usable_ranges(UINTN map_size, UINTN dsize, u32 *out)
     const u64 cap = 512ull * 1024 * 1024;
     for (int i = 0; i < m && count < 15; i++) {
         u64 s = start[i], e = end[i] > cap ? cap : end[i];
-        if (s >= cap || e - s < 64 * 1024)
-            continue;
-        out[1 + count * 2] = (u32)s;
-        out[2 + count * 2] = (u32)e;
-        count++;
-        top = (u32)e;
+        for (int piece = 0; piece < 2; piece++) {                      /* cut the module (the pristine kernel copy) out */
+            u64 ps = s, pe = e;
+            if (hole_end > hole_start && s < hole_end && e > hole_start) {
+                if (piece == 0) pe = hole_start > s ? hole_start : s;
+                else ps = hole_end < e ? hole_end : e;
+            } else if (piece == 1) {
+                break;
+            }
+            if (ps >= cap || pe <= ps || pe - ps < 64 * 1024 || count >= 15)
+                continue;
+            out[1 + count * 2] = (u32)ps;
+            out[2 + count * 2] = (u32)pe;
+            count++;
+            top = (u32)pe;
+        }
     }
     out[0] = count;
     return top;
@@ -290,6 +299,36 @@ EFI_STATUS efi_main(void *image, SYSTEM_TABLE *st)
         }
     }
     kf->Close(kf);
+    UINTN kernel_file_size = pos;
+
+    /* a pristine copy of the kernel for the installer (the running kernel's data changes as it works) */
+    u64 kimg = 0x3FFFFFFF;
+    if (bs->AllocatePages(1 /* AllocateMaxAddress */, 2, (kernel_file_size + 4095) / 4096, &kimg) != EFI_SUCCESS)
+        kimg = 0;
+    else
+        memcpy((void *)kimg, (void *)KERNEL_ADDR, kernel_file_size);
+
+    /* an optional CMDLINE.TXT on the boot volume chooses the mode ("mode=text"); "uefi" is always appended */
+    static char cmdline_buf[128];
+    int cl = 0;
+    {
+        static const CHAR16 cname[] = {'C', 'M', 'D', 'L', 'I', 'N', 'E', '.', 'T', 'X', 'T', 0};
+        EFI_FILE *cf;
+        if (root->Open(root, &cf, cname, 1, 0) == EFI_SUCCESS) {
+            UINTN cn = 100;
+            if (cf->Read(cf, &cn, cmdline_buf) == EFI_SUCCESS)
+                for (UINTN i = 0; i < cn && cmdline_buf[i] != '\n' && cmdline_buf[i] != '\r'; i++)
+                    cl++;
+            cf->Close(cf);
+        }
+        if (!cl) {
+            static const char dflt[] = "mode=desktop";
+            memcpy(cmdline_buf, dflt, sizeof dflt - 1);
+            cl = sizeof dflt - 1;
+        }
+        static const char tail[] = " uefi";
+        memcpy(cmdline_buf + cl, tail, sizeof tail);
+    }
 
     /* graphics: 1024x768, BGR pixels (what the desktop draws) */
     GOP *gop;
@@ -335,8 +374,12 @@ EFI_STATUS efi_main(void *image, SYSTEM_TABLE *st)
     u32 *mbi = (u32 *)info_addr;
     memset(mbi, 0, 4096);
     char *cmdline = (char *)mbi + 512;
-    static const char cmd[] = "mode=desktop";
-    memcpy(cmdline, cmd, sizeof cmd);
+    memcpy(cmdline, cmdline_buf, 128);
+    u32 *module = mbi + 512;                                  /* the Multiboot module list entry, at byte 2048 */
+    if (kimg) {
+        module[0] = (u32)kimg;
+        module[1] = (u32)(kimg + kernel_file_size);
+    }
 
     /* leave the firmware: the memory map must be current when ExitBootServices is called */
     UINTN map_size, key, dsize;
@@ -355,8 +398,10 @@ EFI_STATUS efi_main(void *image, SYSTEM_TABLE *st)
 
 exited:
     __asm__ volatile("cli");
-    u32 top = usable_ranges(map_size, dsize, mbi + 256);      /* the memory ranges, at byte 1024 of the block */
-    mbi[0] = 1 | 4 | (1u << 12) | 0x40000000u | (rsdp ? 0x80000000u : 0);
+    u32 top = usable_ranges(map_size, dsize, mbi + 256, kimg, kimg ? kimg + ((kernel_file_size + 4095) & ~4095ull) : 0);      /* the memory ranges, at byte 1024 of the block */
+    mbi[0] = 1 | 4 | (kimg ? 8 : 0) | (1u << 12) | 0x40000000u | (rsdp ? 0x80000000u : 0);
+    mbi[5] = kimg ? 1 : 0;
+    mbi[6] = kimg ? (u32)(u64)module : 0;
     mbi[1] = 640;
     mbi[2] = top > KERNEL_ADDR ? (top - KERNEL_ADDR) / 1024 : 31 * 1024;
     mbi[4] = (u32)(u64)cmdline;

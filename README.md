@@ -90,12 +90,19 @@ Files you put in `/disk` survive reboots (`make` updates the bootloader and kern
 
 Petrichor boots on both BIOS and UEFI machines. `boot/uefi.c` is a UEFI application (`BOOTX64.EFI`, built as PE32+
 with clang and `lld-link`) that loads `KERNEL.BIN` from the EFI System Partition to 1 MiB, picks a 1024x768 GOP
-framebuffer, reads the memory map (the kernel learns the usable ranges, holes included) and the ACPI tables, leaves
-the firmware and jumps to the kernel's 64-bit entry point, `_start64`. `tools/mkefi.c` builds the FAT16 ESP image and
-a GPT disk image (`build/uefi.img`, usable on a USB stick or in a VM); `petrichor.iso` carries an El Torito UEFI entry
-and an 0xEF partition, so the same ISO or stick boots under BIOS or UEFI. Limits: a UEFI boot is a live session
-(it never touches the boot disk, so `/disk` stays empty), and the installer is hidden, because it writes
-BIOS boot code; the loader also needs 1 MiB to be free RAM (it is on common firmware) and a 32-bit BGR GOP mode.
+framebuffer, reads the memory map (the kernel learns the usable ranges, holes included) and the ACPI tables, keeps a
+pristine copy of the kernel for the installer, leaves the firmware and jumps to the kernel's 64-bit entry point,
+`_start64`. An optional `CMDLINE.TXT` on the boot volume sets the kernel command line (for example `mode=text`).
+`tools/mkefi.c` and the shared `lib/efiimg.c` build the FAT16 ESP image and GPT disks. `petrichor.iso` carries an
+El Torito UEFI entry and an 0xEF partition, so the same ISO or USB stick boots under BIOS or UEFI.
+
+**Installing** works from either: the installer (the Install icon on the desktop, or `pinstall`) matches how the live
+system was booted. Booted through BIOS it writes the BIOS layout (MBR bootloader, kernel, data partition at LBA 4096);
+booted through UEFI it writes a GPT disk with an EFI System Partition (`BOOTX64.EFI` + the kernel) and a data partition
+(`/disk`, found at boot by its partition type), and reads everything back to verify it. A UEFI live session never
+touches a disk that isn't a Petrichor install; an installed system mounts its own data partition and keeps it between
+boots. A UEFI install needs a disk of at least 40 MiB. Tested in QEMU with OVMF: install from the ISO, then boot the
+installed disk twice (the data partition is formatted on the first boot and mounted on the second).
 
 ## What's in it
 

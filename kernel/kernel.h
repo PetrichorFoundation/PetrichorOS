@@ -213,7 +213,8 @@ const char *blk_name(int dev);                   /* "hda".. */
 int blk_bus(int dev);
 int blk_read(int dev, u32 lba, u32 n, void *buf);
 int blk_write(int dev, u32 lba, u32 n, const void *buf);
-extern int boot_disk;                            /* index of the disk we booted from, or -1 */
+extern int boot_disk;
+extern u32 pfs_base_lba, pfs_sectors;                            /* index of the disk we booted from, or -1 */
 int ide_probe(void);
 int ahci_probe(void);
 int nvme_probe(void);

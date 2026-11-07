@@ -14,7 +14,6 @@
 #include "kernel.h"
 
 #define PFS_MAGIC  0x31534650u          /* "PFS1" */
-#define PART_LBA   4096
 #define BLK        4096
 #define SPB        (BLK / 512)
 #define NDIRECT    12
@@ -79,7 +78,7 @@ static struct buf *getbuf(u32 blk, int read)
     victim->valid = 1;
     victim->stamp = ++stamp;
     if (read) {
-        if (blk_read(pdev, PART_LBA + blk * SPB, SPB, victim->data) < 0) {
+        if (blk_read(pdev, pfs_base_lba + blk * SPB, SPB, victim->data) < 0) {
             kprintf("[pfs ] read error on block %u\n", blk);
             memset(victim->data, 0, BLK);
         }
@@ -94,7 +93,7 @@ static struct buf *bnew(u32 blk) { return getbuf(blk, 0); }
 
 static void bwrite(struct buf *b)
 {
-    if (blk_write(pdev, PART_LBA + b->blk * SPB, SPB, b->data) < 0)
+    if (blk_write(pdev, pfs_base_lba + b->blk * SPB, SPB, b->data) < 0)
         kprintf("[pfs ] write error on block %u\n", b->blk);
 }
 
@@ -533,9 +532,10 @@ int pfs_mount(struct inode *mp)
         return -ENODEV;
     pdev = boot_disk;
     u32 sectors = blk_sectors(pdev);
-    if (sectors <= PART_LBA + 64 * SPB)
+    u32 part = pfs_sectors ? pfs_sectors : sectors - pfs_base_lba;    /* GPT installs know their size; BIOS ones run to the end */
+    if (sectors <= pfs_base_lba + 64 * SPB || part < 64 * SPB)
         return -ENODEV;
-    u32 nblocks = (sectors - PART_LBA) / SPB;
+    u32 nblocks = part / SPB;
     if (nblocks > MAX_BLOCKS)
         nblocks = MAX_BLOCKS;
 
