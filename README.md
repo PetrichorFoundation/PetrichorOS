@@ -211,6 +211,17 @@ byte comparison. Big-integer code is not constant-time. Randomness comes from `/
 SHA-256 pool stirred by RDRAND (where the CPU has it) and by timing jitter from interrupts, which is
 solid on real hardware but weaker under an emulator without RDRAND.
 
+**GrapeJuice** (`packages/grapejuice`, install with `ppm install grapejuice`) is a small Windows translation layer:
+`grape program.exe [args]` loads a 64-bit Windows program (PE32+), applies its relocations, resolves its imports
+against GrapeJuice's own implementations of ~80 Windows (kernel32, `MessageBoxA` as text) and C runtime (msvcrt/ucrt)
+functions, and runs it. The Windows x64 calling convention is handled by compiling the shims as `ms_abi`. Once it is
+installed, typing `program.exe` in the shell (or double-clicking it in the File Manager) runs it through `grape`.
+Two samples ship with it (`/disk/share/grapejuice/hello.exe`, `demo.exe`, built by `tools/mkwinsamples.sh`). What it
+can't do: 32-bit programs (the kernel is 64-bit only), programs whose startup code needs a thread environment block
+or exception handling (the standard MSVC/MinGW runtime startup), threads, their own DLLs, floating-point `printf`
+formats, and anything graphical beyond text; `grape -v` lists the imports it resolved, and calling one it lacks stops
+the program with its name. In short: it runs small self-contained console programs, not Wine-class software.
+
 **Package manager** (`ppm`). Packages are `.ppk` archives served over HTTP from a repository whose
 `index` lists name, version, size, SHA-256 and dependencies. `ppm update | search | info |
 install | remove | upgrade | list | files | repo`. Installs resolve dependencies first, verify size

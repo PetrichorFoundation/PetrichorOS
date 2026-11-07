@@ -110,35 +110,75 @@ static int builtin(struct cmd *c)
     return 0;
 }
 
-/* Tries `path`, then `path.rain`. */
+static int ends_with(const char *s, const char *suffix)
+{
+    int n = strlen(s), m = strlen(suffix);
+    if (n < m)
+        return 0;
+    for (int i = 0; i < m; i++)
+        if ((s[n - m + i] | 0x20) != suffix[i])
+            return 0;
+    return 1;
+}
+
+/* Tries `path`, then `path.rain`; remembers which file it was. */
+static char tried[PATH_MAX];
+
 static int exec_rain(const char *path, char **argv)
 {
     char p[PATH_MAX];
+    safestrcpy(tried, path, sizeof tried);
     int e = exec(path, argv);
     if (e == -ENOENT && !strstr(path, ".rain")) {
         snprintf(p, sizeof p, "%s.rain", path);
+        safestrcpy(tried, p, sizeof tried);
         e = exec(p, argv);
     }
     return e;
 }
 
-/* .rain files are Petrichor's executables: a native program or a #! script, found with or without the extension. */
+/* A Windows program: hand it to GrapeJuice (`ppm install grapejuice`). */
+static int exec_windows(char **argv)
+{
+    char *nargv[MAXARGS + 2];
+    int n = 0;
+    nargv[n++] = "grape";
+    nargv[n++] = tried;
+    for (int i = 1; argv[i] && n < MAXARGS; i++)
+        nargv[n++] = argv[i];
+    nargv[n] = NULL;
+    int e = exec("/bin/grape", nargv);
+    if (e == -ENOENT)
+        e = exec("/disk/bin/grape", nargv);
+    if (e == -ENOENT)
+        fprintf(2, "sh: %s is a Windows program; install GrapeJuice to run it: ppm install grapejuice\n", tried);
+    return e;
+}
+
+/* .rain files are Petrichor's executables: a native program or a #! script, found with or without the extension.
+ * .exe files are Windows programs and run through GrapeJuice. */
 static void run_exec(char **argv)
 {
     char path[PATH_MAX];
     int e;
     if (strchr(argv[0], '/')) {
         e = exec_rain(argv[0], argv);
-    } else {                                    /* PATH is the current directory (for .rain files), /bin, /disk/bin */
+    } else {                                    /* PATH is the current directory (for .rain and .exe files), /bin, /disk/bin */
         e = -ENOENT;
-        int len = strlen(argv[0]);
-        if (len > 5 && !strcmp(argv[0] + len - 5, ".rain"))
+        if (ends_with(argv[0], ".rain") || ends_with(argv[0], ".exe")) {
+            safestrcpy(tried, argv[0], sizeof tried);
             e = exec(argv[0], argv);
+        }
         const char *dirs[] = {"/bin", "/disk/bin"};
         for (int i = 0; i < 2 && e == -ENOENT; i++) {
             snprintf(path, sizeof path, "%s/%s", dirs[i], argv[0]);
             e = exec_rain(path, argv);
         }
+    }
+    if (e == -ENOEXEC && ends_with(tried, ".exe")) {
+        e = exec_windows(argv);
+        if (e == -ENOENT)
+            return;
     }
     if (e == -ENOENT)
         fprintf(2, "sh: %s: command not found\n", argv[0]);

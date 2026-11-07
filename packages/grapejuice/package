@@ -1,0 +1,3 @@
+VERSION=0.1
+DEPS=
+DESC="GrapeJuice: run simple 64-bit Windows console programs (.exe)"
