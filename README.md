@@ -144,10 +144,16 @@ dispatches per inode, crosses mount points in both directions (including `..` an
 returns `EXDEV` for cross-device renames, and can `exec` programs stored on disk. The kernel
 formats the partition on first boot.
 
-**Networking** targets QEMU's user-mode network (`10.0.2.15`, gateway `10.0.2.2`, DNS
-`10.0.2.3`, configured statically). Sockets are file descriptors: `socket`, `connect`, `bind`,
-`sendto`, `recvfrom`, plus ordinary `read`/`write`. TCP is a client with stop-and-wait
-transmission, retransmission with timeouts, and orderly close; there is no listen/accept yet.
+**Networking.** Drivers for the common wired cards, picked automatically at boot: Intel PRO/1000 ("e1000", the default
+card in VirtualBox and VMware and in many physical Intel NICs, including QEMU's e1000 and e1000e/82574L), virtio-net
+(QEMU/KVM and most cloud VMs) and the Realtek RTL8139. A DHCP client gets the address, netmask, gateway and DNS server
+from whatever network it is on; if no DHCP server answers within about 15 seconds it falls back to QEMU's user-mode
+defaults (`10.0.2.15`). Sockets are file descriptors: `socket`, `connect`, `bind`, `sendto`, `recvfrom`, plus ordinary
+`read`/`write`; a socket call made while DHCP is still running waits for it. TCP is a client with stop-and-wait
+transmission, retransmission with timeouts, and orderly close; there is no listen/accept yet. Not supported: Wi-Fi,
+USB network adapters, Realtek RTL8168/8111 gigabit cards (very common in PCs, but not emulated by QEMU, so I couldn't
+test a driver), newer Intel I217-I225 cards, IPv6, and DHCP lease renewal. Tested in QEMU with rtl8139, e1000, e1000e and
+virtio-net, on the default network and on a different subnet.
 
 **Desktop** (`user/apps/pdesk`; starts automatically at boot, or run `pdesk`). Real XFCE can't run
 here (it needs X11, GTK, glib, a POSIX libc, dynamic linking and threads), so Petrichor has its own
@@ -302,8 +308,8 @@ Disk drivers are polled (no interrupts), AHCI/NVMe use one queue and one command
 needs 512-byte sectors. The installer copies the whole boot region and has no partitioning, no
 dual-boot support and no choice of what to install. Boot is BIOS-only (no UEFI), and there are no USB
 drivers (keyboard and mouse rely on firmware PS/2 emulation; USB sticks can boot it but can't be
-read once it is running). The network stack has no DHCP (static QEMU addresses), IP fragmentation,
-TCP listen/accept or window-based flow control, and only the RTL8139 is supported. The desktop needs a
+read once it is running). The network stack has no IP fragmentation, DHCP renewal,
+TCP listen/accept or window-based flow control, and Wi-Fi, USB adapters and the Realtek RTL8168 aren't supported. The desktop needs a
 1024x768 32-bit VESA mode and runs in a single process (apps are built in rather than separate
 clients of a window server). Terminal lines don't reflow when a window is resized. `ppm` has no
 package signatures beyond SHA-256 in the index (the repository can now be served over HTTPS). There are no real

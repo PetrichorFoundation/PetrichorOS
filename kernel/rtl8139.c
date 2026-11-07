@@ -24,9 +24,6 @@
 #define RX_RING    8192
 #define RX_BUF     (RX_RING + 16 + 1536)
 
-u8 nic_mac[6];
-int nic_irq_line = -1;
-
 static u16 io;
 static u8 *rx_buf;
 static u32 rx_off;
@@ -34,7 +31,7 @@ static u8 tx_buf[4][1536] __attribute__((aligned(4)));
 static int tx_cur;
 static int tx_used[4];
 
-int nic_init(void)
+int rtl8139_init(void)
 {
     u32 slot;
     for (slot = 0; slot < 32; slot++)
@@ -67,7 +64,7 @@ int nic_init(void)
     return 0;
 }
 
-int nic_send(const u8 *frame, u32 len)
+int rtl8139_send(const u8 *frame, u32 len)
 {
     if (!io || len > 1514)
         return -EINVAL;
@@ -88,7 +85,7 @@ int nic_send(const u8 *frame, u32 len)
     return 0;
 }
 
-void nic_irq(void)
+void rtl8139_irq(void)
 {
     u16 isr = inw(io + REG_ISR);
     outw(io + REG_ISR, isr);                            /* acknowledge */

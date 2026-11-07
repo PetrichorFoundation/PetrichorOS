@@ -241,12 +241,32 @@ int pfs_dirent(struct inode *dir, u32 idx, struct dirent *de);
 int pfs_name_of(struct inode *dir, u32 dino, char *out);
 void pfs_stats(u32 *total_kb, u32 *free_kb);
 
-/* rtl8139.c: network card */
+/* nic.c: network card drivers (rtl8139.c, e1000.c, virtio_net.c) behind one interface */
+struct nic_driver {
+    const char *name;
+    int (*init)(void);                           /* 0 if a card of this kind was found and started */
+    int (*send)(const u8 *frame, u32 len);
+    void (*irq)(void);
+    void (*poll)(void);                          /* also called every tick: receive without relying on the interrupt */
+};
 int nic_init(void);
 int nic_send(const u8 *frame, u32 len);
 void nic_irq(void);
+void nic_poll(void);
 extern u8 nic_mac[6];
 extern int nic_irq_line;
+extern const char *nic_name;
+int rtl8139_init(void);
+int rtl8139_send(const u8 *frame, u32 len);
+void rtl8139_irq(void);
+int e1000_init(void);
+int e1000_send(const u8 *frame, u32 len);
+void e1000_irq(void);
+void e1000_poll(void);
+int virtio_net_init(void);
+int virtio_net_send(const u8 *frame, u32 len);
+void virtio_net_irq(void);
+void virtio_net_poll(void);
 
 /* net.c: Ethernet / ARP / IPv4 / ICMP / UDP / TCP and sockets */
 void net_init(void);

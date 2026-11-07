@@ -26,12 +26,23 @@
 #define RTO_TICKS 100
 #define RTX_MAX   5
 
-/* QEMU user-mode networking defaults. */
+/* The address we use: from DHCP, or QEMU's user-mode defaults if no DHCP server answers. */
 static struct {
     u32 ip, mask, gw, dns;
-} cfg = {IP(10, 0, 2, 15), IP(255, 255, 255, 0), IP(10, 0, 2, 2), IP(10, 0, 2, 3)};
+} cfg;
 
-static int net_up;
+static const struct {
+    u32 ip, mask, gw, dns;
+} qemu_cfg = {IP(10, 0, 2, 15), IP(255, 255, 255, 0), IP(10, 0, 2, 2), IP(10, 0, 2, 3)};
+
+static void dhcp_rx(const u8 *b, u32 len);
+static void dhcp_send(int type);
+static void dhcp_fallback(void);
+static int net_up;                       /* the card works and we have an address */
+static int net_present;                  /* a card was found */
+static char dhcp_chan;
+static int dhcp_state;                   /* 0 idle/done, 1 discover sent, 2 request sent */
+static u32 dhcp_xid, dhcp_offer, dhcp_server, dhcp_next, dhcp_tries;
 static u32 rx_packets, tx_packets;
 
 /* ---------------- byte order and checksums ---------------- */
@@ -255,6 +266,19 @@ static int arp_ensure(u32 ip)
     return arp_lookup(nh) ? 0 : -EHOSTUNREACH;
 }
 
+/* Process context: waits (up to 15 s) for DHCP to finish if the card is still getting its address. */
+static int net_ready(void)
+{
+    if (net_up)
+        return 1;
+    if (!net_present)
+        return 0;
+    u32 deadline = ticks + 1500;
+    while (!net_up && dhcp_state && (i32)(ticks - deadline) < 0 && !cur->killed)
+        sleep_until(&dhcp_chan, deadline);
+    return net_up;
+}
+
 /* ---------------- ICMP ---------------- */
 
 static char ping_chan;
@@ -284,7 +308,7 @@ static void icmp_rx(u32 src, const u8 *m, u32 len, const u8 *srcmac)
 
 int net_ping(u32 ip, u32 timeout_ms)
 {
-    if (!net_up)
+    if (!net_ready())
         return -ENETDOWN;
     int e = arp_ensure(ip);
     if (e < 0)
@@ -328,6 +352,11 @@ static void udp_rx(u32 src, const u8 *u, u32 len)
     u16 sport = get16(u), dport = get16(u + 2), ulen = get16(u + 4);
     if (ulen < 8 || ulen > len)
         return;
+    if (dport == 68 && sport == 67) {                           /* DHCP server -> us */
+        if (dhcp_state)
+            dhcp_rx(u + 8, ulen - 8);
+        return;
+    }
     u32 dlen = ulen - 8;
     for (int i = 0; i < NSOCK; i++) {
         struct sock *s = socks[i];
@@ -349,7 +378,7 @@ static void udp_rx(u32 src, const u8 *u, u32 len)
 
 int sock_sendto(struct sock *s, const void *buf, u32 n, u32 ip, u16 port)
 {
-    if (!net_up)
+    if (!net_ready())
         return -ENETDOWN;
     if (s->type != SOCK_DGRAM)
         return -EINVAL;
@@ -552,7 +581,7 @@ static void tcp_rx(u32 src, const u8 *t, u32 len, const u8 *srcmac)
 
 int sock_connect(struct sock *s, u32 ip, u16 port)
 {
-    if (!net_up)
+    if (!net_ready())
         return -ENETDOWN;
     if (s->type == SOCK_DGRAM) {
         s->rip = ip;
@@ -689,6 +718,18 @@ void sock_close(struct sock *s)
 /* Retransmission and cleanup timers; runs every tick from the timer IRQ. */
 void net_tick(void)
 {
+    if (net_present) {
+        nic_poll();
+        if (dhcp_state && (i32)(ticks - dhcp_next) >= 0) {
+            if (++dhcp_tries > 7) {
+                dhcp_fallback();
+            } else {
+                dhcp_state = 1;
+                dhcp_next = ticks + 200;
+                dhcp_send(1);
+            }
+        }
+    }
     for (int i = 0; i < NSOCK; i++) {
         struct sock *s = socks[i];
         if (!s || s->type != SOCK_STREAM)
@@ -709,6 +750,101 @@ void net_tick(void)
         s->pend_retries++;
         s->pend_tick = ticks;
         tcp_output(s, s->pend_flags, s->pend, s->pend_len, s->pend_seq, NULL);
+    }
+}
+
+/* ---------------- DHCP ---------------- */
+
+static void dhcp_send(int type)
+{
+    static u8 m[300 + 8];
+    memset(m, 0, sizeof m);
+    u8 *b = m + 8;                               /* the BOOTP message; the UDP header goes in front */
+    b[0] = 1;                                    /* BOOTREQUEST */
+    b[1] = 1;                                    /* Ethernet */
+    b[2] = 6;
+    put32(b + 4, dhcp_xid);
+    put16(b + 10, 0x8000);                       /* broadcast flag: we can't receive unicast before we have an address */
+    memcpy(b + 28, nic_mac, 6);
+    b[236] = 99; b[237] = 130; b[238] = 83; b[239] = 99;
+    u8 *o = b + 240;
+    *o++ = 53; *o++ = 1; *o++ = type;
+    if (type == 3) {
+        *o++ = 50; *o++ = 4; put32(o, dhcp_offer); o += 4;
+        *o++ = 54; *o++ = 4; put32(o, dhcp_server); o += 4;
+    }
+    *o++ = 55; *o++ = 3; *o++ = 1; *o++ = 3; *o++ = 6;     /* ask for the mask, router and DNS servers */
+    *o++ = 255;
+    put16(m, 68);
+    put16(m + 2, 67);
+    put16(m + 4, 8 + 300);
+    put16(m + 6, 0);
+    ip_send(0xFFFFFFFFu, 17, m, 8 + 300, bcast_mac);
+}
+
+static void dhcp_start(void)
+{
+    u32 r;
+    random_bytes(&r, sizeof r);
+    dhcp_xid = r;
+    dhcp_state = 1;
+    dhcp_tries = 0;
+    dhcp_next = ticks + 200;
+    dhcp_send(1);
+}
+
+static void dhcp_fallback(void)
+{
+    cfg.ip = qemu_cfg.ip;
+    cfg.mask = qemu_cfg.mask;
+    cfg.gw = qemu_cfg.gw;
+    cfg.dns = qemu_cfg.dns;
+    dhcp_state = 0;
+    net_up = 1;
+    kprintf("[net ] no DHCP server answered: using the QEMU defaults, %d.%d.%d.%d\n", cfg.ip >> 24, (cfg.ip >> 16) & 255,
+            (cfg.ip >> 8) & 255, cfg.ip & 255);
+    wakeup(&dhcp_chan);
+}
+
+static void dhcp_rx(const u8 *b, u32 len)
+{
+    if (len < 241 || b[0] != 2 || get32(b + 4) != dhcp_xid || memcmp(b + 28, nic_mac, 6) || b[236] != 99 || b[237] != 130)
+        return;
+    u32 yiaddr = get32(b + 16), mask = 0, gw = 0, dns = 0, server = 0;
+    int type = 0;
+    for (u32 i = 240; i + 1 < len && b[i] != 255;) {
+        u8 code = b[i];
+        if (code == 0) { i++; continue; }
+        u8 l = b[i + 1];
+        if (i + 2 + l > len)
+            break;
+        const u8 *v = b + i + 2;
+        if (code == 53 && l == 1) type = v[0];
+        else if (code == 1 && l == 4) mask = get32(v);
+        else if (code == 3 && l >= 4) gw = get32(v);
+        else if (code == 6 && l >= 4) dns = get32(v);
+        else if (code == 54 && l == 4) server = get32(v);
+        i += 2 + l;
+    }
+    if (type == 2 && dhcp_state == 1 && yiaddr) {               /* OFFER: ask for it */
+        dhcp_offer = yiaddr;
+        dhcp_server = server;
+        dhcp_state = 2;
+        dhcp_send(3);
+    } else if (type == 5 && dhcp_state == 2) {                  /* ACK: we are configured */
+        cfg.ip = yiaddr;
+        cfg.mask = mask ? mask : IP(255, 255, 255, 0);
+        cfg.gw = gw;
+        cfg.dns = dns ? dns : gw;
+        dhcp_state = 0;
+        net_up = 1;
+        kprintf("[net ] DHCP: %d.%d.%d.%d, gateway %d.%d.%d.%d, DNS %d.%d.%d.%d\n", cfg.ip >> 24, (cfg.ip >> 16) & 255,
+                (cfg.ip >> 8) & 255, cfg.ip & 255, cfg.gw >> 24, (cfg.gw >> 16) & 255, (cfg.gw >> 8) & 255, cfg.gw & 255,
+                cfg.dns >> 24, (cfg.dns >> 16) & 255, (cfg.dns >> 8) & 255, cfg.dns & 255);
+        wakeup(&dhcp_chan);
+    } else if (type == 6 && dhcp_state == 2) {                  /* NAK: start over */
+        dhcp_state = 1;
+        dhcp_send(1);
     }
 }
 
@@ -756,6 +892,7 @@ void net_info(struct netinfo *ni)
     ni->mask = cfg.mask;
     ni->gw = cfg.gw;
     ni->dns = cfg.dns;
+    safestrcpy(ni->nic, nic_name, sizeof ni->nic);
     ni->rx_packets = rx_packets;
     ni->tx_packets = tx_packets;
 }
@@ -767,8 +904,8 @@ void net_init(void)
         kprintf("[net ] no supported network card (%d)\n", e);
         return;
     }
-    net_up = 1;
-    kprintf("[net ] rtl8139 %02x:%02x:%02x:%02x:%02x:%02x irq %d, %d.%d.%d.%d\n", nic_mac[0],
-            nic_mac[1], nic_mac[2], nic_mac[3], nic_mac[4], nic_mac[5], nic_irq_line,
-            cfg.ip >> 24, (cfg.ip >> 16) & 255, (cfg.ip >> 8) & 255, cfg.ip & 255);
+    net_present = 1;
+    kprintf("[net ] %s %02x:%02x:%02x:%02x:%02x:%02x irq %d: asking for an address (DHCP)\n", nic_name, nic_mac[0],
+            nic_mac[1], nic_mac[2], nic_mac[3], nic_mac[4], nic_mac[5], nic_irq_line);
+    dhcp_start();
 }

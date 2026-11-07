@@ -226,6 +226,7 @@ struct netinfo {
     u8 up, pad;
     u32 ip, mask, gw, dns;
     u32 rx_packets, tx_packets;
+    char nic[16];               /* driver name: "e1000", "virtio-net", "rtl8139" */
 };
 
 struct diskinfo {
