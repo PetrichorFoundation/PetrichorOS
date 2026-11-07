@@ -6,8 +6,8 @@
 
 #define KSTACK_SIZE      8192
 #define NPROC            64
-#define NOFILE           16
-#define NFILE            128
+#define NOFILE           32
+#define NFILE            256
 #define PAGE_SIZE        4096u
 #define USER_BASE        0x40000000u
 #define USER_TOP         0xC0000000u
@@ -102,6 +102,7 @@ struct file {
 
 /* ---- processes ---- */
 struct proc {
+    u8 fpu[512] __attribute__((aligned(16)));    /* x87/SSE state (fxsave format), switched with the process */
     int pid, ppid, pgid;
     int state;
     u64 *pd;
@@ -148,6 +149,8 @@ void panic(const char *fmt, ...) __attribute__((noreturn));
 /* gdt.c / idt.c */
 void gdt_init(void);
 void tss_set_kstack(uptr sp);
+void fpu_init(void);
+void fpu_reset(u8 *state);                       /* the state of a fresh program */
 void idt_init(void);
 void irq_unmask(int irq);
 void timer_init(u32 hz);

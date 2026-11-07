@@ -54,6 +54,27 @@ void gdt_init(void)
     __asm__ volatile("ltr %%ax" : : "a"(0x28));
 }
 
+/* User programs (Windows ones in particular) use SSE.  The kernel itself is built without it, so the only
+ * thing to do is turn it on and give every process its own register state. */
+void fpu_init(void)
+{
+    u64 cr0, cr4;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 = (cr0 & ~4ull) | 2;                                  /* clear EM, set MP */
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= (1u << 9) | (1u << 10);                            /* OSFXSR, OSXMMEXCPT */
+    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
+    __asm__ volatile("fninit");
+}
+
+void fpu_reset(u8 *state)
+{
+    memset(state, 0, 512);
+    *(u16 *)state = 0x37F;                                    /* x87 control word: the power-on default */
+    *(u32 *)(state + 24) = 0x1F80;                            /* MXCSR: all exceptions masked */
+}
+
 void tss_set_kstack(uptr sp)
 {
     tss.rsp0 = sp;

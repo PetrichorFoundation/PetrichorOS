@@ -268,3 +268,10 @@ void gfx_round_rect(int x, int y, int w, int h, int r, u32 argb, int ring)
         }
     }
 }
+
+void gfx_blit_rgb(const u32 *src, int x, int y, int w, int h)
+{
+    struct rect r = rect_isect((struct rect){x, y, w, h}, clip);
+    for (int row = 0; row < r.h; row++)
+        memcpy(tgt + (r.y + row) * tw + r.x, src + (r.y - y + row) * w + (r.x - x), r.w * 4);
+}

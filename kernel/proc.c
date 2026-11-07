@@ -29,6 +29,7 @@ static struct proc *proc_alloc(void)
         p->kstack = kmalloc(KSTACK_SIZE);
         if (!p->kstack)
             return NULL;
+        fpu_reset(p->fpu);
         p->pid = next_pid++;
         p->state = PS_EMBRYO;
         p->start_tick = ticks;
@@ -106,6 +107,8 @@ void schedule(void)
     if (next->kstack)
         tss_set_kstack((uptr)next->kstack + KSTACK_SIZE);
     vmm_switch(next->pd ? next->pd : kernel_pd);
+    __asm__ volatile("fxsave %0" : "=m"(*(u8 (*)[512])old->fpu));
+    __asm__ volatile("fxrstor %0" : : "m"(*(u8 (*)[512])next->fpu));
     switch_context(&old->ctx_sp, next->ctx_sp);
 }
 
@@ -186,6 +189,8 @@ int proc_fork(struct regs *r)
     memcpy(np->name, cur->name, sizeof np->name);
     np->ppid = cur->pid;
     np->pgid = cur->pgid;
+    __asm__ volatile("fxsave %0" : "=m"(*(u8 (*)[512])cur->fpu));      /* the child starts with the parent's registers */
+    memcpy(np->fpu, cur->fpu, sizeof np->fpu);
     *np->tf = *r;
     np->tf->rax = 0;
     np->state = PS_RUNNABLE;

@@ -114,6 +114,9 @@ static int exec_image(struct proc *p, struct inode *ip, const u8 *img, int argc,
     const char *base = strrchr(argv[0], '/');
     safestrcpy(p->name, base ? base + 1 : argv[0], sizeof p->name);
 
+    fpu_reset(p->fpu);
+    if (p == cur)
+        __asm__ volatile("fxrstor %0" : : "m"(*(u8 (*)[512])p->fpu));
     struct regs *tf = p->tf;
     memset(tf, 0, sizeof *tf);
     tf->cs = 0x23;

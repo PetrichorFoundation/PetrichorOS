@@ -20,6 +20,7 @@ typedef unsigned int DWORD;
 typedef int BOOL;
 
 static int verbose;
+static void destroy_all_windows(void);
 static DWORD last_error;
 static const char *cmdline;
 static u8 *image_base;
@@ -240,7 +241,7 @@ static BOOL WINAPI k_WriteConsoleW(HANDLE h, const u16 *buf, DWORD n, DWORD *wri
 
 static BOOL WINAPI k_ReadConsoleA(HANDLE h, void *buf, DWORD n, DWORD *got, void *ctl) { return k_ReadFile(h, buf, n, got, 0); }
 
-static void WINAPI k_ExitProcess(DWORD code) { exit((int)code); }
+static void WINAPI k_ExitProcess(DWORD code) { destroy_all_windows(); exit((int)code); }
 static BOOL WINAPI k_TerminateProcess(HANDLE h, DWORD code) { exit((int)code); }
 static const char *WINAPI k_GetCommandLineA(void) { return cmdline; }
 
@@ -381,11 +382,6 @@ static int WINAPI k_WideCharToMultiByte(DWORD cp, DWORD fl, const u16 *s, int n,
 
 static DWORD WINAPI k_GetEnvironmentVariableA(const char *name, char *buf, DWORD n) { last_error = 203; return 0; }
 static void WINAPI k_GetStartupInfoA(void *si) { memset(si, 0, 104); *(DWORD *)si = 104; }
-static int WINAPI u_MessageBoxA(HANDLE wnd, const char *text, const char *caption, DWORD type)
-{
-    printf("[%s] %s\n", caption ? caption : "Message", text ? text : "");
-    return 1;                                              /* IDOK */
-}
 
 /* ------------------------------------------------------------------ the C runtime */
 
@@ -505,12 +501,17 @@ static unsigned rng = 1;
 static void WINAPI c_srand(unsigned s) { rng = s; }
 static int WINAPI c_rand(void) { rng = rng * 1103515245 + 12345; return (rng >> 16) & 0x7fff; }
 
-/* ------------------------------------------------------------------ imports */
+/* ------------------------------------------------------------------ windows and drawing */
 
 struct imp {
     const char *name;
     void *fn;
 };
+
+#include "gdi.inc"
+#include "win.inc"
+
+/* ------------------------------------------------------------------ imports */
 
 #define K(n) {#n, (void *)k_##n}
 #define C(n) {#n, (void *)c_##n}
@@ -529,7 +530,6 @@ static const struct imp imports[] = {
     {"GetLocalTime", (void *)k_GetSystemTime},
     {"InitializeCriticalSection", (void *)k_CriticalSection}, {"EnterCriticalSection", (void *)k_CriticalSection},
     {"LeaveCriticalSection", (void *)k_CriticalSection}, {"DeleteCriticalSection", (void *)k_CriticalSection},
-    {"MessageBoxA", (void *)u_MessageBoxA},
     C(printf), C(fprintf), C(sprintf), C(puts), C(putchar), C(getchar), C(fputs), C(fputc), C(fwrite), C(fread),
     C(fgets), C(fflush), C(feof), C(fopen), C(fclose), C(strlen), C(strcmp), C(strncmp), C(strcpy), C(strncpy),
     C(strcat), C(strchr), C(strrchr), C(strstr), C(memcpy), C(memmove), C(memset), C(memcmp), C(malloc), C(calloc),
@@ -544,6 +544,9 @@ static void *lookup_import(const char *name)
     for (u32 i = 0; i < sizeof imports / sizeof imports[0]; i++)
         if (!strcmp(imports[i].name, name))
             return imports[i].fn;
+    for (u32 i = 0; i < sizeof gui_imports / sizeof gui_imports[0]; i++)
+        if (!strcmp(gui_imports[i].name, name))
+            return gui_imports[i].fn;
     return NULL;
 }
 

@@ -505,7 +505,7 @@ int syscall_dispatch(struct regs *r)
     case SYS_poll: {
         struct pollfd *fds = (struct pollfd *)(uptr)a;
         int n = b, timeout = (int)c;
-        if (n < 0 || n > 16 || !user_ok(a, n * sizeof *fds))
+        if (n < 0 || n > 64 || !user_ok(a, n * sizeof *fds))
             return -EFAULT;
         u32 deadline = timeout > 0 ? ticks + (timeout + 9) / 10 : 0;
         for (;;) {

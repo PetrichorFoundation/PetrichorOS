@@ -287,13 +287,16 @@ int file_seek(struct file *f, int off, int whence)
     return f->off;
 }
 
-/* Would read() return without blocking?  POLLIN, plus POLLHUP for a closed pipe. */
+/* Would read() (POLLIN) or, for a pipe's write end, a 512-byte write() (POLLOUT) return without blocking? POLLHUP for a closed pipe. */
 int file_ready(struct file *f)
 {
     switch (f->type) {
     case FD_PIPE:
-        if (!f->readable)
+        if (!f->readable) {
+            if (f->writable && (!f->pipe->readopen || PIPE_SIZE - (f->pipe->nwrite - f->pipe->nread) >= 512))
+                return POLLOUT;
             return 0;
+        }
         if (f->pipe->nread != f->pipe->nwrite)
             return POLLIN;
         return f->pipe->writeopen ? 0 : POLLIN | POLLHUP;

@@ -1,12 +1,29 @@
 /* Terminal: runs /bin/sh on a pair of pipes.  There is no pty, so this app
  * does the line editing and echo that the kernel tty would normally do. */
 #include "desk.h"
+#include "winproto.h"
 
 #define TCOLS  120
 #define TLINES 400
 
+#define MAXCW 8
+
+struct term;
+
+struct cwin {                                    /* a window opened by a Windows program (GrapeJuice) */
+    struct term *t;
+    int id, w, h;
+    struct win *win;
+    u32 *fb;
+    u32 close_asked;
+};
+
 struct term {
     struct win *win;
+    int upfd, downfd;                            /* window protocol: messages from programs, events to them */
+    u8 ibuf[8192];
+    int ilen;
+    struct cwin *cw[MAXCW];
     u8 ch[TLINES][TCOLS];
     u8 col[TLINES][TCOLS];
     int cols;                    /* wrap width, follows the window */
@@ -147,6 +164,183 @@ static void term_draw(struct win *w, struct rect c)
         gfx_text(c.x + c.w - 150, c.y + 2, "[scrolled back]", RGB(0xd8, 0xb0, 0x30));
 }
 
+/* ---------------- windows of Windows programs ---------------- */
+
+static int send_event(struct term *t, u32 type, u32 id, u32 a, u32 b, u32 c)
+{
+    if (t->downfd < 0)
+        return -1;
+    struct pollfd p = {t->downfd, POLLOUT, 0};
+    if (poll(&p, 1, 0) <= 0 || !(p.revents & POLLOUT))
+        return -1;                               /* the program isn't reading: drop it rather than block the desktop */
+    struct pw_event e = {type, id, a, b, c, 0};
+    return write(t->downfd, &e, sizeof e) == (int)sizeof e ? 0 : -1;
+}
+
+static void cw_draw(struct win *w, struct rect c)
+{
+    struct cwin *cw = w->data;
+    gfx_fill(c.x, c.y, c.w, c.h, RGB(0x30, 0x30, 0x30));
+    if (cw->fb)
+        gfx_blit_rgb(cw->fb, c.x, c.y, cw->w, cw->h);
+}
+
+static void cw_mouse(struct win *w, int x, int y, int kind)
+{
+    struct cwin *cw = w->data;
+    u32 k = kind == M_DOWN ? 1 : kind == M_UP ? 2 : kind == M_RDOWN ? 3 : kind == M_DBL ? 4 : 0;
+    if (kind == M_MOVE && 0)
+        return;
+    send_event(cw->t, PE_MOUSE, cw->id, x < 0 ? 0 : x, y < 0 ? 0 : y, k);
+}
+
+static void cw_key(struct win *w, struct input_event *e)
+{
+    struct cwin *cw = w->data;
+    send_event(cw->t, PE_KEY, cw->id, e->code, e->flags, 0);
+}
+
+static void cw_wheel(struct win *w, int dir)
+{
+    struct cwin *cw = w->data;
+    send_event(cw->t, PE_WHEEL, cw->id, dir, 0, 0);
+}
+
+static void cw_close(struct win *w)
+{
+    struct cwin *cw = w->data;
+    for (int i = 0; i < MAXCW; i++)
+        if (cw->t->cw[i] == cw)
+            cw->t->cw[i] = NULL;
+    free(cw->fb);
+    free(cw);
+}
+
+static int cw_request_close(struct win *w)
+{
+    struct cwin *cw = w->data;
+    u32 now = uptime();
+    if (cw->close_asked && now - cw->close_asked < 300)
+        return 0;                                /* asked twice within 3 seconds: the program is stuck, force it */
+    if (send_event(cw->t, PE_CLOSE, cw->id, 0, 0, 0) < 0)
+        return 0;
+    cw->close_asked = now ? now : 1;
+    return 1;
+}
+
+static const struct app cwin_app = {
+    .draw = cw_draw,
+    .mouse = cw_mouse,
+    .key = cw_key,
+    .wheel = cw_wheel,
+    .close = cw_close,
+    .request_close = cw_request_close,
+};
+
+static struct cwin *cw_find(struct term *t, u32 id)
+{
+    for (int i = 0; i < MAXCW; i++)
+        if (t->cw[i] && t->cw[i]->id == (int)id)
+            return t->cw[i];
+    return NULL;
+}
+
+static void cw_handle(struct term *t, const struct pw_msg *m, const u8 *payload)
+{
+    struct cwin *cw = cw_find(t, m->id);
+    switch (m->type) {
+    case PW_CREATE: {
+        if (cw || m->a < 1 || m->b < 1)
+            return;
+        int slot = -1;
+        for (int i = 0; i < MAXCW; i++)
+            if (!t->cw[i]) { slot = i; break; }
+        if (slot < 0)
+            return;
+        struct cwin *n = calloc(1, sizeof *n);
+        if (!n)
+            return;
+        n->t = t;
+        n->id = m->id;
+        n->w = m->a > PW_MAX_W ? PW_MAX_W : m->a;
+        n->h = m->b > PW_MAX_H ? PW_MAX_H : m->b;
+        n->fb = malloc(n->w * n->h * 4);
+        if (!n->fb) { free(n); return; }
+        for (int i = 0; i < n->w * n->h; i++)
+            n->fb[i] = 0xFFFFFF;
+        char title[64];
+        int tl = m->len < 63 ? m->len : 63;
+        memcpy(title, payload, tl);
+        title[tl] = 0;
+        t->cw[slot] = n;
+        n->win = wm_open(&cwin_app, n->w + 2, n->h + TITLE_H + 1, title[0] ? title : "Windows program", n);
+        if (!n->win) {
+            t->cw[slot] = NULL;
+            free(n->fb);
+            free(n);
+        }
+        break;
+    }
+    case PW_PRESENT:
+        if (!cw || m->c == 0 || m->len < m->c * 4 || m->a >= (u32)cw->w || m->b >= (u32)cw->h)
+            return;
+        {
+            u32 cnt = m->c;
+            if (m->a + cnt > (u32)cw->w) cnt = cw->w - m->a;
+            memcpy(cw->fb + m->b * cw->w + m->a, payload, cnt * 4);
+            wm_invalidate_rect(cw->win->x + 1 + m->a, cw->win->y + TITLE_H + m->b, cnt, 1);
+        }
+        break;
+    case PW_TITLE:
+        if (cw && cw->win) {
+            char title[64];
+            int tl = m->len < 63 ? m->len : 63;
+            memcpy(title, payload, tl);
+            title[tl] = 0;
+            wm_set_title(cw->win, title);
+        }
+        break;
+    case PW_DESTROY:
+        if (cw && cw->win)
+            wm_close(cw->win);
+        break;
+    }
+}
+
+/* Reads whatever the programs sent and acts on each complete message. */
+static void cw_read(struct term *t)
+{
+    int n = read(t->upfd, t->ibuf + t->ilen, sizeof t->ibuf - t->ilen);
+    if (n <= 0) {
+        close(t->upfd);
+        t->upfd = -1;
+        return;
+    }
+    t->ilen += n;
+    int pos = 0;
+    while (t->ilen - pos >= (int)sizeof(struct pw_msg)) {
+        struct pw_msg m;
+        memcpy(&m, t->ibuf + pos, sizeof m);
+        if (m.len > 4096) {                       /* garbage: drop the whole buffer */
+            pos = t->ilen;
+            break;
+        }
+        if (t->ilen - pos < (int)(sizeof m + m.len))
+            break;
+        cw_handle(t, &m, t->ibuf + pos + sizeof m);
+        pos += sizeof m + m.len;
+    }
+    memmove(t->ibuf, t->ibuf + pos, t->ilen - pos);
+    t->ilen -= pos;
+}
+
+static void cw_close_all(struct term *t)
+{
+    for (int i = 0; i < MAXCW; i++)
+        if (t->cw[i] && t->cw[i]->win)
+            wm_close(t->cw[i]->win);
+}
+
 /* ---------------- process plumbing ---------------- */
 
 /* Kills everything the shell started, but not the shell itself. */
@@ -168,6 +362,9 @@ static void kill_children(struct term *t)
 static void term_close(struct win *w)
 {
     struct term *t = w->data;
+    cw_close_all(t);
+    if (t->upfd >= 0) close(t->upfd);
+    if (t->downfd >= 0) close(t->downfd);
     if (t->alive) {
         kill_children(t);
         kill(t->pid, 9);
@@ -177,18 +374,24 @@ static void term_close(struct win *w)
     free(t);
 }
 
-static int term_pollfd(struct win *w, struct pollfd *p)
+static int term_pollfds(struct win *w, struct pollfd *p, int max)
 {
     struct term *t = w->data;
-    if (!t->alive)
-        return 0;
-    *p = (struct pollfd){t->rfd, POLLIN, 0};
-    return 1;
+    int n = 0;
+    if (t->alive && n < max)
+        p[n++] = (struct pollfd){t->rfd, POLLIN, 0};
+    if (t->upfd >= 0 && n < max)
+        p[n++] = (struct pollfd){t->upfd, POLLIN, 0};
+    return n;
 }
 
 static void term_fdready(struct win *w, struct pollfd *p)
 {
     struct term *t = w->data;
+    if (p->fd == t->upfd) {
+        cw_read(t);
+        return;
+    }
     char buf[512];
     int n = read(t->rfd, buf, sizeof buf);
     if (n > 0) {
@@ -220,6 +423,7 @@ static void term_key(struct win *w, struct input_event *e)
         puts_t(t, "^C\n");
         t->inlen = 0;
         kill_children(t);
+        cw_close_all(t);
         t->scroll = 0;
     } else if (ctrl && (e->code == 'd' || e->code == 'D')) {
         if (t->inlen == 0) {
@@ -267,7 +471,7 @@ static const struct app term_app = {
     .wheel = term_wheel,
     .draw = term_draw,
     .key = term_key,
-    .pollfd = term_pollfd,
+    .pollfds = term_pollfds,
     .fdready = term_fdready,
     .close = term_close,
 };
@@ -280,32 +484,42 @@ void term_open(const char *initial_command)
     clear_all(t);
     t->fg = 7;
     t->cols = 80;
-    t->wfd = t->rfd = -1;
+    t->wfd = t->rfd = t->upfd = t->downfd = -1;
 
-    int in[2], out[2];
-    if (pipe(in) < 0 || pipe(out) < 0) {
+    int in[2], out[2], up[2], down[2];
+    if (pipe(in) < 0 || pipe(out) < 0 || pipe(up) < 0 || pipe(down) < 0) {
         free(t);
         return;
     }
     int pid = fork();
     if (pid < 0) {
-        close(in[0]); close(in[1]); close(out[0]); close(out[1]);
+        close(in[0]); close(in[1]); close(out[0]); close(out[1]); close(up[0]); close(up[1]); close(down[0]); close(down[1]);
         free(t);
         return;
     }
     if (pid == 0) {
         setpgid(0, 0);
+        dup2(up[1], NOFILE_USER - 1);                    /* park the window-protocol pipes out of the way... */
+        dup2(down[0], NOFILE_USER - 2);
         dup2(in[0], 0);
         dup2(out[1], 1);
         dup2(out[1], 2);
-        for (int fd = 3; fd < NOFILE_USER; fd++)       /* don't leak other windows' pipes */
+        for (int fd = 3; fd < NOFILE_USER - 2; fd++)     /* don't leak other windows' pipes */
             close(fd);
+        dup2(NOFILE_USER - 1, PW_FD_UP);                 /* ...and put them at fds 3 and 4 for the shell's programs */
+        dup2(NOFILE_USER - 2, PW_FD_DOWN);
+        close(NOFILE_USER - 1);
+        close(NOFILE_USER - 2);
         char *argv[] = {"sh", NULL};
         exec("/bin/sh", argv);
         exit(127);
     }
     close(in[0]);
     close(out[1]);
+    close(up[1]);
+    close(down[0]);
+    t->upfd = up[0];
+    t->downfd = down[1];
     t->pid = pid;
     t->wfd = in[1];
     t->rfd = out[0];

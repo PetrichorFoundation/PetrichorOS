@@ -75,6 +75,7 @@
 #define KEY_F1      0x111   /* F1..F10 are consecutive */
 
 #define POLLIN   1
+#define POLLOUT  4              /* a pipe has room for at least 512 more bytes */
 #define POLLHUP  0x10
 #define POLLNVAL 0x20
 

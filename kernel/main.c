@@ -66,6 +66,7 @@ void kmain(u32 magic, u32 *mbi)
     }
 
     gdt_init();
+    fpu_init();
     idt_init();
     mem_init(kb * 1024);
     random_init();

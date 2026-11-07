@@ -219,14 +219,26 @@ solid on real hardware but weaker under an emulator without RDRAND.
 
 **GrapeJuice** (`packages/grapejuice`, install with `ppm install grapejuice`) is a small Windows translation layer:
 `grape program.exe [args]` loads a 64-bit Windows program (PE32+), applies its relocations, resolves its imports
-against GrapeJuice's own implementations of ~80 Windows (kernel32, `MessageBoxA` as text) and C runtime (msvcrt/ucrt)
-functions, and runs it. The Windows x64 calling convention is handled by compiling the shims as `ms_abi`. Once it is
-installed, typing `program.exe` in the shell (or double-clicking it in the File Manager) runs it through `grape`.
-Two samples ship with it (`/disk/share/grapejuice/hello.exe`, `demo.exe`, built by `tools/mkwinsamples.sh`). What it
-can't do: 32-bit programs (the kernel is 64-bit only), programs whose startup code needs a thread environment block
-or exception handling (the standard MSVC/MinGW runtime startup), threads, their own DLLs, floating-point `printf`
-formats, and anything graphical beyond text; `grape -v` lists the imports it resolved, and calling one it lacks stops
-the program with its name. In short: it runs small self-contained console programs, not Wine-class software.
+against GrapeJuice's own implementations of the Windows API, and runs it. Typing `program.exe` in the shell (or
+double-clicking it in the File Manager) runs it through `grape`.
+
+- **Console programs**: ~80 kernel32 and C runtime (msvcrt/ucrt) functions (printf, malloc, file I/O, heap, time...).
+- **GUI programs** (from a terminal in the desktop): Win32 windows with `RegisterClass`/`CreateWindowEx`, the message
+  loop (`GetMessage`/`DispatchMessage`, `WM_PAINT`, mouse, keyboard, `WM_TIMER`, `WM_CLOSE`...), GDI drawing (pens,
+  brushes, rectangles, ellipses, polygons, lines, text, bitmaps, `BitBlt`/`StretchDIBits`, DIB sections), built-in
+  BUTTON / STATIC / EDIT controls (push buttons, check boxes, radio buttons, group boxes, single-line edit) and a
+  real `MessageBox` dialog. Each top-level window becomes a window of the desktop: the program draws into its own
+  pixel buffer and sends rows over two pipes that every terminal gives its shell (`include/winproto.h`); the desktop
+  sends back mouse, keyboard and close events. The kernel now enables SSE with per-process register state, because
+  compiled Windows code uses it everywhere.
+- Samples ship with the package (`/disk/share/grapejuice/hello.exe`, `demo.exe`, `gui1.exe`, `gui2.exe`, built by
+  `tools/mkwinsamples.sh`; sources are alongside).
+
+It is **not Wine**. It can run small Win32 programs that use the subset above; it can't run 32-bit programs (the
+kernel is 64-bit only), anything using DirectX, OpenGL, .NET, COM or MFC-style resources, menus (they are accepted but
+not shown), dialog templates, common controls (list views, trees, tabs), threads, their own DLLs, or the standard
+MSVC/MinGW startup code (needs a thread environment block and exception handling). `grape -v` lists the imports it
+resolved; calling one it lacks stops the program with its name. Windows can't be resized by the user.
 
 **Package manager** (`ppm`). Packages are `.ppk` archives served over HTTP from a repository whose
 `index` lists name, version, size, SHA-256 and dependencies. `ppm update | search | info |

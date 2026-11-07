@@ -20,6 +20,7 @@ void gfx_frame(int x, int y, int w, int h, u32 c);   /* 1px outline */
 void gfx_vgrad(int x, int y, int w, int h, u32 top, u32 bottom);
 void gfx_blend(int x, int y, int w, int h, u32 c, int alpha);   /* alpha 0..255 */
 void gfx_copy(const u32 *src, int x, int y, int w, int h);      /* src has the target's size */
+void gfx_blit_rgb(const u32 *px, int x, int y, int w, int h);   /* opaque copy of w*h pixels, clipped */
 void gfx_blit_argb(const u32 *px, int x, int y, int w, int h);  /* premultiplied 0xAARRGGBB, w*h pixels */
 
 void gfx_blit_a8(const u8 *a, int x, int y, int w, int h, u32 color);   /* color through an 8-bit coverage mask */

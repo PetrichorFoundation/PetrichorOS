@@ -7,7 +7,7 @@
 #define PANEL_H  28
 #define TITLE_H  26
 #define DOCK_H   58
-#define NOFILE_USER 16
+#define NOFILE_USER 32
 
 /* Palette (loosely Greybird/XFCE). */
 #define C_PANEL      RGB(0x26, 0x2d, 0x35)
@@ -42,6 +42,7 @@ struct app {
     int (*pollfds)(struct win *w, struct pollfd *p, int max);   /* several fds; returns how many */
     void (*fdready)(struct win *w, struct pollfd *p);
     void (*close)(struct win *w);
+    int (*request_close)(struct win *w);                   /* the user clicked X: return 1 to handle it (and close later) */
 };
 
 struct win {
@@ -59,6 +60,7 @@ struct win {
 /* window manager (main.c) */
 struct win *wm_open(const struct app *app, int w, int h, const char *title, void *data);
 void wm_close(struct win *w);
+void wm_try_close(struct win *w);                   /* like wm_close, but lets the app decline (Windows programs) */
 void wm_set_title(struct win *w, const char *title);
 void wm_invalidate(struct win *w);                          /* repaint the whole window */
 void wm_invalidate_rect(int x, int y, int w, int h);

@@ -375,6 +375,13 @@ void wm_close(struct win *w)
     invalidate(0, 0, SCREEN_W, PANEL_H);
 }
 
+void wm_try_close(struct win *w)
+{
+    if (w->app->request_close && w->app->request_close(w))
+        return;
+    wm_close(w);
+}
+
 #define WORK_H (SCREEN_H - PANEL_H - DOCK_H + 10)
 
 static void set_geometry(struct win *w, int x, int y, int ww, int hh)
@@ -1354,7 +1361,7 @@ static void on_down(int dbl)
             activate(w);
         if (my < w->y + TITLE_H) {
             int rx = w->x + w->w;
-            if (mx >= rx - 24 && mx < rx - 6) { wm_close(w); return; }
+            if (mx >= rx - 24 && mx < rx - 6) { wm_try_close(w); return; }
             if (mx >= rx - 46 && mx < rx - 28) { toggle_maximize(w); return; }
             if (mx >= rx - 68 && mx < rx - 50) { minimize(w); return; }
             if (dbl) { toggle_maximize(w); return; }
@@ -1511,7 +1518,7 @@ static void handle_key(struct input_event *e)
     if ((e->flags & IEF_ALT) && e->code == '\t') { cycle_focus(); return; }
     if ((e->flags & IEF_ALT) && e->code == KEY_F1 + 3) {           /* Alt+F4 */
         if (focus)
-            wm_close(focus);
+            wm_try_close(focus);
         return;
     }
     if ((e->flags & IEF_ALT) && e->code == KEY_F1 + 1) {           /* Alt+F2: run a program */
