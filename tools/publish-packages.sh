@@ -8,6 +8,8 @@
 #   tools/publish-packages.sh                  assemble build/packages-repo (nothing is uploaded)
 #   tools/publish-packages.sh OWNER/NAME       ...and push it to github.com/OWNER/NAME (create it first, as an
 #                                              empty public repository, or let `gh` create it)
+#   tools/publish-packages.sh --into DIR       ...and copy it into an existing clone of the packages repository
+#                                              (commit it and `git push` yourself)
 set -e
 cd "$(dirname "$0")/.."
 
@@ -34,6 +36,16 @@ EOT
 
 echo "assembled $out:"
 ls "$out"
+
+printf '*.ppk binary\n' >"$out/.gitattributes"
+
+if [ "$1" = "--into" ]; then
+    cp -R "$out"/. "$2"/
+    # keep the clone's own .gitattributes line for text, and make sure packages are never newline-converted
+    grep -q '^\*\.ppk binary' "$2/.gitattributes" 2>/dev/null || printf '*.ppk binary\n' >>"$2/.gitattributes"
+    echo "copied into $2"
+    exit 0
+fi
 
 if [ -z "$1" ]; then
     echo

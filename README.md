@@ -219,7 +219,7 @@ package that others need, and the shell finds programs in `/bin` and `/disk/bin`
 `tools/mkppk` builds packages; `make repo` builds the sample repository from `packages/`
 (`cowsay`, `fortune`, `lolcow`, `calc`, `hd`); `make serve-repo` serves it.
 
-By default `ppm` downloads from a public GitHub repository, `krspybacon/petrichor-packages`, over HTTPS (it
+By default `ppm` downloads from a public GitHub repository, `krspybacon/Petrichor-Packages`, over HTTPS (it
 falls back to the development server below if that can't be reached), so on a running Petrichor
 `ppm update && ppm install cowsay` just works. `tools/publish-packages.sh OWNER/petrichor-packages` builds the
 repository and pushes it to GitHub; `ppm repo URL` points a machine at a different repository.

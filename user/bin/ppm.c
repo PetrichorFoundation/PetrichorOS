@@ -20,7 +20,7 @@
 #define DBDIR     STATE "/db"
 #define INDEXFILE STATE "/index"
 #define CONFFILE  ROOT "/etc/ppm.conf"
-#define DEFAULT_REPO "https://raw.githubusercontent.com/krspybacon/petrichor-packages/main"
+#define DEFAULT_REPO "https://raw.githubusercontent.com/krspybacon/Petrichor-Packages/main"
 #define LOCAL_REPO   "http://10.0.2.2:8080"       /* `make serve-repo` on the host, tried if the default repository is unreachable */
 
 struct pkg {
