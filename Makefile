@@ -40,8 +40,8 @@ $(foreach a,$(UAPPS),$(eval $(call APP_RULE,$(a))))
 UEXE += $(addprefix $B/user/out/,$(UAPPS))
 
 .DEFAULT_GOAL := all
-.PHONY: all iso run run-multiboot run-nographic run-iso run-installer run-installed clean-target clean
-all: $B/petrichor.elf $B/disk.img $B/petrichor.iso $B/repo/index
+.PHONY: all iso run run-uefi run-uefi-iso run-multiboot run-nographic run-iso run-installer run-installed clean-target clean
+all: $B/petrichor.elf $B/disk.img $B/petrichor.iso $B/uefi.img $B/repo/index
 
 $B/petrichor.elf: $(KOBJ) kernel/kernel.ld
 	$(LD) $(LDFLAGS) -T kernel/kernel.ld -o $@ $(KOBJ)
@@ -101,6 +101,25 @@ $B/boot/%.bin: boot/%.S boot/%.ld
 	$(CC) -target i386-unknown-none-elf -c $< -o $B/boot/$*.o
 	$(LD) -m elf_i386 -T boot/$*.ld --oformat binary -o $@ $B/boot/$*.o
 
+# ---- UEFI: the loader (a PE32+ application), the FAT boot partition and a GPT disk image ----
+LLDLINK := lld-link
+
+$B/BOOTX64.EFI: boot/uefi.c
+	@mkdir -p $B/boot
+	$(CC) -target x86_64-unknown-windows -ffreestanding -fno-stack-protector -mno-red-zone -fshort-wchar \
+	      -fno-builtin -O2 -Wall -c $< -o $B/boot/uefi.o
+	$(LLDLINK) /subsystem:efi_application /entry:efi_main /nodefaultlib /out:$@ $B/boot/uefi.o
+
+$B/mkefi: tools/mkefi.c
+	@mkdir -p $B
+	$(HOSTCC) -O2 -o $@ $<
+
+$B/esp.img: $B/mkefi $B/BOOTX64.EFI $B/kernel.bin
+	$B/mkefi fat $@ $B/BOOTX64.EFI $B/kernel.bin
+
+$B/uefi.img: $B/mkefi $B/esp.img
+	$B/mkefi gpt $@ $B/esp.img
+
 $B/kernel.bin: $(KOBJ) kernel/kernel.ld
 	$(LD) $(LDFLAGS) -T kernel/kernel.ld --oformat binary -o $@ $(KOBJ)
 
@@ -113,8 +132,8 @@ $B/mkiso: tools/mkiso.c
 	@mkdir -p $B
 	$(HOSTCC) -O2 -o $@ $<
 
-$B/petrichor.iso: $B/mkiso $B/boot/stage1.bin $B/boot/stage2.bin $B/kernel.bin
-	$B/mkiso $B/boot/stage1.bin $B/boot/stage2.bin $B/kernel.bin $@
+$B/petrichor.iso: $B/mkiso $B/boot/stage1.bin $B/boot/stage2.bin $B/kernel.bin $B/esp.img
+	$B/mkiso $B/boot/stage1.bin $B/boot/stage2.bin $B/kernel.bin $@ $B/esp.img
 
 iso: $B/petrichor.iso
 
@@ -163,6 +182,24 @@ run-installed: all $B/target.img
 
 clean-target:
 	rm -f $B/target.img
+
+# UEFI: boot with OVMF (EDK II) firmware, from the GPT disk image or from the ISO.
+OVMF_CODE ?= $(firstword $(wildcard /opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/local/share/qemu/edk2-x86_64-code.fd \
+             /usr/share/qemu/edk2-x86_64-code.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd))
+OVMF_VARS ?= $(firstword $(wildcard /opt/homebrew/share/qemu/edk2-i386-vars.fd /usr/local/share/qemu/edk2-i386-vars.fd \
+             /usr/share/qemu/edk2-i386-vars.fd /usr/share/OVMF/OVMF_VARS.fd /usr/share/edk2/ovmf/OVMF_VARS.fd))
+UEFIFLAGS = -m 128 -no-reboot -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+            -drive if=pflash,format=raw,file=$B/ovmf-vars.fd -nic user,model=rtl8139 -serial stdio
+
+$B/ovmf-vars.fd:
+	@test -n "$(OVMF_VARS)" || { echo "no OVMF firmware found: set OVMF_CODE and OVMF_VARS"; exit 1; }
+	cp $(OVMF_VARS) $@
+
+run-uefi: all $B/ovmf-vars.fd
+	$(QEMU) $(UEFIFLAGS) -drive file=$B/uefi.img,format=raw,if=none,id=d0 -device ide-hd,drive=d0
+
+run-uefi-iso: all $B/ovmf-vars.fd
+	$(QEMU) $(UEFIFLAGS) -cdrom $B/petrichor.iso -boot d
 
 run-multiboot: all
 	$(QEMU) $(QEMUFLAGS) -kernel $B/kernel.bin -serial stdio

@@ -1,6 +1,6 @@
 /* mkiso: build a bootable Petrichor ISO (El Torito) that is also a bootable USB image.
  *
- *   mkiso stage1.bin stage2.bin kernel.bin out.iso
+ *   mkiso stage1.bin stage2.bin kernel.bin out.iso [esp.img]
  *
  * Layout (2048-byte sectors):
  *   0-15   system area: stage 1 at byte 0 (with a partition entry) and stage 2 at byte 512, laid out
@@ -10,6 +10,8 @@
  *   19     boot catalog                  20/21 path tables (L, M)      22  root directory
  *   23     BOOT.IMG: stage 1 patched to read stage 2 from the CD (what firmware loads for "CD boot")
  *   24..   STAGE2.BIN, then KERNEL.BIN
+ *   ...    ESP.IMG (optional): a FAT EFI System Partition image, listed in the boot catalog as the UEFI boot
+ *          entry and in the MBR as an 0xEF partition, so UEFI firmware boots the ISO and the USB stick too
  * Stage 2 reads the kernel from the CD with 2048-byte sectors; it is told where it is via kernel_lba
  * (in 512-byte units) which we set here.
  */
@@ -79,8 +81,8 @@ static int dirrec(uint8_t *p, uint32_t lba, uint32_t size, int is_dir, const cha
 
 int main(int argc, char **argv)
 {
-    if (argc != 5) {
-        fprintf(stderr, "usage: mkiso stage1.bin stage2.bin kernel.bin out.iso\n");
+    if (argc != 5 && argc != 6) {
+        fprintf(stderr, "usage: mkiso stage1.bin stage2.bin kernel.bin out.iso [esp.img]\n");
         return 1;
     }
     size_t n1, n2, nk;
@@ -92,8 +94,17 @@ int main(int argc, char **argv)
 
     uint32_t s2_secs = (n2 + SEC - 1) / SEC;
     uint32_t s2_sec = 24, k_sec = s2_sec + s2_secs, k_secs = (nk + SEC - 1) / SEC;
-    total_secs = k_sec + k_secs;
+    uint32_t esp_sec = k_sec + k_secs, esp_secs = 0;
+    size_t ne = 0;
+    uint8_t *esp = NULL;
+    if (argc == 6) {
+        esp = slurp(argv[5], &ne);
+        esp_secs = (ne + SEC - 1) / SEC;
+    }
+    total_secs = esp_sec + esp_secs;
     iso = calloc(total_secs, SEC);
+    if (esp)
+        memcpy(sector(esp_sec), esp, ne);
 
     /* kernel + stage 2, with the kernel's position patched into stage 2 */
     uint32_t ksectors512 = (nk + 511) / 512, klba512 = k_sec * 4;
@@ -113,6 +124,15 @@ int main(int argc, char **argv)
     pe[5] = 0xFE; pe[6] = 0xFF; pe[7] = 0xFF;
     le32(pe + 8, 0);
     le32(pe + 12, total_secs * 4);
+    if (esp) {                                              /* partition 2: the EFI System Partition */
+        uint8_t *p2 = sys + 446 + 16;
+        p2[0] = 0;
+        p2[1] = 0xFE; p2[2] = 0xFF; p2[3] = 0xFF;
+        p2[4] = 0xEF;
+        p2[5] = 0xFE; p2[6] = 0xFF; p2[7] = 0xFF;
+        le32(p2 + 8, esp_sec * 4);
+        le32(p2 + 12, (uint32_t)(ne / 512));
+    }
 
     /* BOOT.IMG: stage 1 that reads stage 2 from the CD */
     uint8_t *boot = sector(23);
@@ -182,6 +202,19 @@ int main(int argc, char **argv)
     ent[4] = 0;
     ent[6] = 4; ent[7] = 0;                                 /* load 4 virtual (512-byte) sectors */
     le32(ent + 8, 23);
+    if (esp) {                                              /* the UEFI boot entry: a section header and one entry */
+        uint8_t *sh = cat + 64;
+        sh[0] = 0x91;                                       /* final section header */
+        sh[1] = 0xEF;                                       /* platform: EFI */
+        sh[2] = 1; sh[3] = 0;                               /* one entry */
+        memcpy(sh + 4, "PETRICHOR-UEFI", 14);
+        uint8_t *se = cat + 96;
+        se[0] = 0x88;                                       /* bootable */
+        se[1] = 0;                                          /* no emulation */
+        uint32_t vsecs = (uint32_t)(ne / 512);
+        se[6] = vsecs; se[7] = vsecs >> 8;
+        le32(se + 8, esp_sec);
+    }
 
     /* 20/21: path tables (root only) */
     uint8_t *pl = sector(20), *pm = sector(21);
@@ -195,6 +228,8 @@ int main(int argc, char **argv)
     d += dirrec(d, 23, 2048, 0, "BOOT.IMG;1", -1);
     d += dirrec(d, s2_sec, (uint32_t)n2, 0, "STAGE2.BIN;1", -1);
     d += dirrec(d, k_sec, (uint32_t)nk, 0, "KERNEL.BIN;1", -1);
+    if (esp)
+        d += dirrec(d, esp_sec, (uint32_t)ne, 0, "ESP.IMG;1", -1);
 
     FILE *out = fopen(argv[4], "wb");
     if (!out || fwrite(iso, SEC, total_secs, out) != total_secs) {

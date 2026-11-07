@@ -12,6 +12,13 @@
 
 #define MAXWIN 12
 
+static void ghost_open(struct win *w);
+static void ghost_close(struct win *w);
+static void ghost_minimize(struct win *w);
+static void ghost_restore(struct win *w);
+static u32 popup_started;
+static u32 dock_bounce[16];
+
 /* ---------------- state ---------------- */
 
 static struct fbinfo fb;
@@ -67,6 +74,8 @@ u32 theme_accent_color(int i) { return accents[i]; }
 
 #define THEME_CONF "/disk/etc/pdesk.conf"
 
+int g_animations = 1;
+
 static void theme_load(void)
 {
     g_wall = 0;
@@ -81,6 +90,8 @@ static void theme_load(void)
         if (p) g_wall = atoi(p + 5);
         p = strstr(buf, "accent=");
         if (p) g_accent_idx = atoi(p + 7);
+        p = strstr(buf, "anim=");
+        if (p) g_animations = atoi(p + 5);
     }
     if (g_wall < 0 || g_wall >= NWALL) g_wall = 0;
     if (g_accent_idx < 0 || g_accent_idx >= NACCENT) g_accent_idx = 0;
@@ -146,6 +157,22 @@ struct rect wm_client(struct win *w)
     return (struct rect){w->x + 1, w->y + TITLE_H, w->w - 2, w->h - TITLE_H - 1};
 }
 
+static void theme_save(void)
+{
+    struct diskinfo di;
+    diskinfo(&di);
+    if (di.mounted) {
+        mkdir("/disk/etc");
+        char buf[64];
+        int n = snprintf(buf, sizeof buf, "wall=%d\naccent=%d\nanim=%d\n", g_wall, g_accent_idx, g_animations);
+        int fd = open(THEME_CONF, O_WRONLY | O_CREAT | O_TRUNC);
+        if (fd >= 0) {
+            write(fd, buf, n);
+            close(fd);
+        }
+    }
+}
+
 void theme_set(int wall_idx, int accent_idx)
 {
     g_wall = wall_idx;
@@ -153,18 +180,13 @@ void theme_set(int wall_idx, int accent_idx)
     g_accent = accents[accent_idx];
     render_wallpaper();
     invalidate(0, 0, SCREEN_W, SCREEN_H);
-    struct diskinfo di;
-    diskinfo(&di);
-    if (di.mounted) {
-        mkdir("/disk/etc");
-        char buf[48];
-        int n = snprintf(buf, sizeof buf, "wall=%d\naccent=%d\n", g_wall, g_accent_idx);
-        int fd = open(THEME_CONF, O_WRONLY | O_CREAT | O_TRUNC);
-        if (fd >= 0) {
-            write(fd, buf, n);
-            close(fd);
-        }
-    }
+    theme_save();
+}
+
+void anim_set(int on)
+{
+    g_animations = on;
+    theme_save();
 }
 
 static const char *const cursor_art[19] = {
@@ -207,7 +229,7 @@ static void cursor_hide(void)
 #define NTOAST 4
 static struct {
     char text[72];
-    u32 expire;
+    u32 expire, born;
 } toasts[NTOAST];
 
 static struct rect toast_rect(int i)
@@ -221,8 +243,13 @@ void wm_notify(const char *msg)
         toasts[i] = toasts[i - 1];
     safestrcpy(toasts[0].text, msg, sizeof toasts[0].text);
     toasts[0].expire = uptime() + 450;
+    toasts[0].born = uptime();
     invalidate(SCREEN_W - 330, PANEL_H, 330, NTOAST * 42 + 12);
 }
+
+static int ease_out(int t);
+
+static int toast_offset(const void *t_);
 
 static void draw_toasts(void)
 {
@@ -230,6 +257,7 @@ static void draw_toasts(void)
         if (!toasts[i].expire)
             continue;
         struct rect r = toast_rect(i);
+        r.x += toast_offset(&toasts[i]);
         gfx_blend(r.x + 3, r.y + 3, r.w, r.h, 0, 70);
         gfx_fill(r.x, r.y, r.w, r.h, RGB(0x20, 0x28, 0x32));
         gfx_frame(r.x, r.y, r.w, r.h, RGB(0x50, 0x62, 0x74));
@@ -263,6 +291,8 @@ static void raise_win(struct win *w)
 {
     z_remove(w);
     zorder[nz++] = w;
+    if (w->minimized)
+        ghost_restore(w);
     w->minimized = 0;
 }
 
@@ -306,6 +336,7 @@ struct win *wm_open(const struct app *app, int w, int h, const char *title, void
         win->y = SCREEN_H - DOCK_H - h > PANEL_H ? SCREEN_H - DOCK_H - h : PANEL_H;
     zorder[nz++] = win;
     set_focus(win);
+    ghost_open(win);
     wm_invalidate(win);
     return win;
 }
@@ -331,6 +362,7 @@ void wm_close(struct win *w)
 {
     if (!w->used)
         return;
+    ghost_close(w);
     wm_invalidate(w);
     if (w->app->close)
         w->app->close(w);
@@ -370,6 +402,7 @@ static void toggle_maximize(struct win *w)
 
 static void minimize(struct win *w)
 {
+    ghost_minimize(w);
     w->minimized = 1;
     wm_invalidate(w);
     if (focus == w)
@@ -524,9 +557,17 @@ static int popup_index_at(struct popup *p, int x, int y)
     return -1;
 }
 
+static int popup_reveal_h(int full);
+
 static void popup_draw(struct popup *p)
 {
     struct rect m = popup_rect(p);
+    struct rect saved = gfx_get_clip();
+    int reveal = popup_reveal_h(m.h + 6);
+    if (reveal < m.h + 6) {                                      /* unrolling: only the top part shows */
+        struct rect c = rect_isect(saved, (struct rect){m.x, m.y, m.w + 6, reveal});
+        gfx_set_clip(c.x, c.y, c.w, c.h);
+    }
     gfx_blend(m.x + 3, m.y + 3, m.w, m.h, 0, 60);
     gfx_fill(m.x, m.y, m.w, m.h, RGB(0xf4, 0xf5, 0xf6));
     gfx_frame(m.x, m.y, m.w, m.h, RGB(0x50, 0x5a, 0x64));
@@ -543,6 +584,7 @@ static void popup_draw(struct popup *p)
         }
         y += h;
     }
+    gfx_set_clip(saved.x, saved.y, saved.w, saved.h);
 }
 
 static void popup_close(void)
@@ -565,6 +607,7 @@ static void popup_show(struct popup *p, int x, int y)
     if (p->x + m.w > SCREEN_W) p->x = SCREEN_W - m.w - 2;
     if (p->y + m.h > SCREEN_H) p->y = SCREEN_H - m.h - 2;
     open_popup = p;
+    popup_started = uptime();
     m = popup_rect(p);
     invalidate(m.x, m.y, m.w + 6, m.h + 6);
     invalidate(0, 0, 130, PANEL_H);
@@ -817,6 +860,8 @@ static struct rect dock_icon_rect(int i)
     return (struct rect){d.x + 10 + i * 54, d.y + 6, 44, 44};
 }
 
+static int dock_lift_px(int i);
+
 static void draw_dock(void)
 {
     struct rect d = dock_rect();
@@ -826,7 +871,7 @@ static void draw_dock(void)
         struct rect r = dock_icon_rect(i);
         if (dock_hover == i)
             gfx_blend(r.x - 2, r.y - 2, r.w + 4, r.h + 4, C_WHITE, 55);
-        icon_draw(dock_items[i].icon, r.x + 6, r.y + 4, 32);
+        icon_draw(dock_items[i].icon, r.x + 6, r.y + 4 - dock_lift_px(i), 32);
     }
     if (dock_hover >= 0) {
         struct rect r = dock_icon_rect(dock_hover);
@@ -838,7 +883,306 @@ static void draw_dock(void)
     }
 }
 
+/* ---------------- animations ----------------
+ *
+ * Windows open, close, minimize and restore by animating a "ghost": a snapshot of the window drawn
+ * scaled and faded.  Menus unroll, dock icons lift when hovered and bounce when launched, and
+ * notifications slide in.  Everything follows the clock (uptime ticks), so slow frames just skip ahead. */
+
+static int ease_out(int t)                                       /* t, result: 0..256 */
+{
+    int u = 256 - t;
+    return 256 - u * u / 256 * u / 256;
+}
+
+enum { GH_OPEN, GH_CLOSE, GH_MIN, GH_RESTORE };
+#define NGHOST 6
+
+struct ghost {
+    int used, kind, alpha;
+    u32 *px;
+    int pw, ph;
+    struct rect from, to, cur, last;
+    int a0, a1;
+    u32 start;
+    int dur;
+    struct win *win;                                              /* hidden until the ghost lands */
+};
+
+static struct ghost ghosts[NGHOST];
+
+static struct rect lerp_rect(struct rect a, struct rect b, int e)
+{
+    return (struct rect){a.x + (b.x - a.x) * e / 256, a.y + (b.y - a.y) * e / 256,
+                         a.w + (b.w - a.w) * e / 256, a.h + (b.h - a.h) * e / 256};
+}
+
+static struct rect scaled_rect(struct rect r, int pct)
+{
+    int w = r.w * pct / 100, h = r.h * pct / 100;
+    return (struct rect){r.x + (r.w - w) / 2, r.y + (r.h - h) / 2, w, h};
+}
+
+static struct rect taskbar_slot(struct win *w)
+{
+    int count = 0, idx = 0;
+    for (int i = 0; i < MAXWIN; i++) {
+        if (!wins[i].used)
+            continue;
+        if (&wins[i] == w)
+            idx = count;
+        count++;
+    }
+    return taskbar_rect(idx, count);
+}
+
+/* Draws the window, as it looks right now, into a fresh buffer of its own size. */
+static u32 *capture_window(struct win *w)
+{
+    if (w->w <= 0 || w->h <= 0 || (long)w->w * w->h > SCREEN_W * SCREEN_H)
+        return NULL;
+    u32 *buf = malloc(w->w * w->h * 4);
+    if (!buf)
+        return NULL;
+    struct rect old = gfx_get_clip();
+    gfx_set_target(buf, w->w, w->h);
+    int ox = w->x, oy = w->y, hid = w->hide;
+    w->x = w->y = 0;
+    w->hide = 0;
+    draw_window(w, (struct rect){0, 0, w->w, w->h});
+    w->x = ox;
+    w->y = oy;
+    w->hide = hid;
+    gfx_set_target(back, SCREEN_W, SCREEN_H);
+    gfx_set_clip(old.x, old.y, old.w, old.h);
+    return buf;
+}
+
+static void ghost_add(int kind, struct win *w, u32 *px, struct rect from, struct rect to, int a0, int a1, int dur)
+{
+    for (int i = 0; i < NGHOST; i++) {
+        if (ghosts[i].used)
+            continue;
+        struct ghost *g = &ghosts[i];
+        memset(g, 0, sizeof *g);
+        g->used = 1;
+        g->kind = kind;
+        g->px = px;
+        g->pw = w->w;
+        g->ph = w->h;
+        g->from = g->cur = g->last = from;
+        g->to = to;
+        g->a0 = a0;
+        g->a1 = a1;
+        g->start = uptime();
+        g->dur = dur;
+        g->win = (kind == GH_OPEN || kind == GH_RESTORE) ? w : NULL;
+        g->alpha = a0;
+        return;
+    }
+    free(px);
+    if (kind == GH_OPEN || kind == GH_RESTORE)
+        w->hide = 0;
+}
+
+static void ghost_open(struct win *w)
+{
+    if (!g_animations || !running)
+        return;
+    struct rect full = {w->x, w->y, w->w, w->h};
+    w->hide = 1;
+    ghost_add(GH_OPEN, w, NULL, scaled_rect(full, 90), full, 0, 255, 16);
+}
+
+static void ghost_close(struct win *w)
+{
+    if (!g_animations || !running || w->minimized || w->hide)
+        return;
+    u32 *px = capture_window(w);
+    if (!px)
+        return;
+    struct rect full = {w->x, w->y, w->w, w->h};
+    ghost_add(GH_CLOSE, w, px, full, scaled_rect(full, 88), 255, 0, 13);
+}
+
+static void ghost_minimize(struct win *w)
+{
+    if (!g_animations || !running || w->hide)
+        return;
+    u32 *px = capture_window(w);
+    if (!px)
+        return;
+    struct rect full = {w->x, w->y, w->w, w->h}, slot = taskbar_slot(w);
+    ghost_add(GH_MIN, w, px, full, slot, 255, 40, 18);
+}
+
+static void ghost_restore(struct win *w)
+{
+    if (!g_animations || !running)
+        return;
+    u32 *px = capture_window(w);
+    if (!px)
+        return;
+    struct rect full = {w->x, w->y, w->w, w->h}, slot = taskbar_slot(w);
+    w->hide = 1;
+    ghost_add(GH_RESTORE, w, px, slot, full, 40, 255, 18);
+}
+
+static int popup_reveal_h(int full)
+{
+    if (!g_animations || !open_popup)
+        return full;
+    int t = (int)(uptime() - popup_started) * 256 / 12;
+    if (t >= 256)
+        return full;
+    return full * ease_out(t < 0 ? 0 : t) / 256;
+}
+
+static int toast_offset(const void *t_)
+{
+    const u32 *born = (const u32 *)((const char *)t_ + 72 + 4);         /* struct layout: text[72], expire, born */
+    if (!g_animations)
+        return 0;
+    int t = (int)(uptime() - *born) * 256 / 14;
+    if (t >= 256)
+        return 0;
+    return (256 - ease_out(t < 0 ? 0 : t)) * 340 / 256;
+}
+
+static int dock_lift[16];                                        /* 0..256 */
+
+static int dock_lift_px(int i)
+{
+    int lift = g_animations ? dock_lift[i] * 7 / 256 : 0;
+    if (g_animations && dock_bounce[i]) {
+        int ph = (int)(uptime() - dock_bounce[i]);
+        if (ph >= 0 && ph < 60) {
+            int tri = ph % 20 < 10 ? ph % 20 : 20 - ph % 20, amp = 16 - (ph / 20) * 5;
+            lift += tri * amp / 10;
+        }
+    }
+    return lift;
+}
+
+static int anim_active(void)
+{
+    if (!g_animations)
+        return 0;
+    for (int i = 0; i < NGHOST; i++)
+        if (ghosts[i].used)
+            return 1;
+    u32 now = uptime();
+    if (open_popup && (int)(now - popup_started) < 14)
+        return 1;
+    for (int i = 0; i < NDOCK; i++)
+        if (dock_lift[i] != (dock_hover == i ? 256 : 0) || (dock_bounce[i] && (int)(now - dock_bounce[i]) < 62))
+            return 1;
+    for (int i = 0; i < NTOAST; i++)
+        if (toasts[i].expire && (int)(now - toasts[i].born) < 16)
+            return 1;
+    return 0;
+}
+
+static struct rect grow(struct rect r, int n) { return (struct rect){r.x - n, r.y - n, r.w + 2 * n, r.h + 2 * n}; }
+
+static void anim_step(u32 now)
+{
+    if (!g_animations) {
+        for (int i = 0; i < NGHOST; i++)
+            if (ghosts[i].used) {                                  /* switched off mid-animation: finish at once */
+                ghosts[i].start = now - 1000;
+            }
+    }
+    for (int i = 0; i < NGHOST; i++) {
+        struct ghost *g = &ghosts[i];
+        if (!g->used)
+            continue;
+        if (g->kind == GH_OPEN && !g->px) {                        /* the app has drawn its first frame by now */
+            if (g->win && g->win->used)
+                g->px = capture_window(g->win);
+            if (!g->px) {
+                if (g->win) g->win->hide = 0;
+                invalidate(grow(g->to, 8).x, grow(g->to, 8).y, grow(g->to, 8).w, grow(g->to, 8).h);
+                g->used = 0;
+                continue;
+            }
+        }
+        int t = (int)(now - g->start) * 256 / g->dur;
+        if (t > 256) t = 256;
+        if (t < 0) t = 0;
+        int e = ease_out(t);
+        g->cur = lerp_rect(g->from, g->to, e);
+        g->alpha = g->a0 + (g->a1 - g->a0) * e / 256;
+        struct rect u = grow(rect_union(g->last, g->cur), 8);
+        invalidate(u.x, u.y, u.w, u.h);
+        g->last = g->cur;
+        if (t >= 256) {
+            if (g->win && g->win->used) {
+                g->win->hide = 0;
+                wm_invalidate(g->win);
+            }
+            free(g->px);
+            g->px = NULL;
+            g->used = 0;
+        }
+    }
+    int moved = 0;
+    for (int i = 0; i < NDOCK; i++) {
+        int target = g_animations && dock_hover == i ? 256 : 0, old = dock_lift[i];
+        dock_lift[i] += (target - dock_lift[i]) * 2 / 5;
+        if (abs_i(target - dock_lift[i]) < 12)
+            dock_lift[i] = target;
+        if (dock_lift[i] != old || (dock_bounce[i] && (int)(now - dock_bounce[i]) < 62))
+            moved = 1;
+        if (dock_bounce[i] && (int)(now - dock_bounce[i]) >= 62)
+            dock_bounce[i] = 0;
+    }
+    if (moved) {
+        struct rect d = dock_rect();
+        invalidate(d.x, d.y - 30, d.w, d.h + 30);
+    }
+    if (open_popup && (int)(now - popup_started) < 14) {
+        struct rect m = popup_rect(open_popup);
+        invalidate(m.x, m.y, m.w + 6, m.h + 6);
+    }
+    for (int i = 0; i < NTOAST; i++)
+        if (toasts[i].expire && (int)(now - toasts[i].born) < 16)
+            invalidate(SCREEN_W - 330, PANEL_H, 330, NTOAST * 42 + 12);
+}
+
+/* Draws a snapshot scaled into d, blended with the screen at alpha 0..255. */
+static void blit_scaled(const u32 *src, int sw, int sh, struct rect d, int alpha)
+{
+    if (d.w <= 0 || d.h <= 0 || alpha <= 0)
+        return;
+    struct rect c = rect_isect(d, gfx_get_clip());
+    if (c.w <= 0)
+        return;
+    static int xmap[SCREEN_W];
+    for (int x = 0; x < c.w; x++)
+        xmap[x] = (int)((long)(c.x + x - d.x) * sw / d.w);
+    for (int y = c.y; y < c.y + c.h; y++) {
+        const u32 *row = src + (int)((long)(y - d.y) * sh / d.h) * sw;
+        u32 *out = back + y * SCREEN_W + c.x;
+        if (alpha >= 255)
+            for (int x = 0; x < c.w; x++)
+                out[x] = row[xmap[x]];
+        else
+            for (int x = 0; x < c.w; x++)
+                out[x] = gfx_mix(out[x], row[xmap[x]], alpha);
+    }
+}
+
+static void anim_draw(void)
+{
+    for (int i = 0; i < NGHOST; i++)
+        if (ghosts[i].used && ghosts[i].px)
+            blit_scaled(ghosts[i].px, ghosts[i].pw, ghosts[i].ph, ghosts[i].cur, ghosts[i].alpha);
+}
+
 /* ---------------- repaint ---------------- */
+
+static void anim_draw(void);
 
 static void repaint(void)
 {
@@ -852,8 +1196,9 @@ static void repaint(void)
     gfx_copy(wall, 0, 0, SCREEN_W, SCREEN_H);
     draw_desktop_icons();
     for (int i = 0; i < nz; i++)
-        if (!zorder[i]->minimized)
+        if (!zorder[i]->minimized && !zorder[i]->hide)
             draw_window(zorder[i], d);
+    anim_draw();
     draw_panel();
     draw_dock();
     draw_toasts();
@@ -871,7 +1216,7 @@ static struct win *window_at(int x, int y)
 {
     for (int i = nz - 1; i >= 0; i--) {
         struct win *w = zorder[i];
-        if (!w->minimized && rect_hit((struct rect){w->x, w->y, w->w, w->h}, x, y))
+        if (!w->minimized && !w->hide && rect_hit((struct rect){w->x, w->y, w->w, w->h}, x, y))
             return w;
     }
     return NULL;
@@ -997,7 +1342,10 @@ static void on_down(int dbl)
     if (rect_hit(dock_rect(), mx, my)) {                           /* the dock floats above windows */
         for (int i = 0; i < NDOCK; i++)
             if (rect_hit(dock_icon_rect(i), mx, my))
+            {
+                dock_bounce[i] = uptime();
                 launch(dock_items[i].action);
+            }
         return;
     }
     struct win *w = window_at(mx, my);
@@ -1241,6 +1589,9 @@ static void gallery_draw(struct win *w, struct rect c)
 
 static const struct app gallery_app = {.draw = gallery_draw};
 
+static int anim_active(void);
+static void anim_step(u32 now);
+
 int main(int argc, char **argv)
 {
     int e = fbmap(&fb, SCREEN_W, SCREEN_H);
@@ -1269,6 +1620,9 @@ int main(int argc, char **argv)
     for (int i = 0; i < nd; i++)
         if (!di[i].boot && di[i].sectors >= 6144)
             installable = 1;
+    struct stat kst;                                     /* no kernel image (UEFI boot): nothing to install from */
+    if (installable && (stat("/dev/kernelimg", &kst) < 0 || kst.size == 0))
+        installable = 0;
     if (installable)
         dicons[ndicons++] = (struct dicon){"Install Petrichor", NULL, ICON_INSTALL};
     build_menus();
@@ -1298,7 +1652,7 @@ int main(int argc, char **argv)
             } else if (w->app->pollfd && n < 64 && w->app->pollfd(w, &pf[n]))
                 owner[n++] = w;
         }
-        int r = poll(pf, n, 100);
+        int r = poll(pf, n, anim_active() ? 20 : 100);
 
         cursor_hide();
         if (r > 0) {
@@ -1321,6 +1675,7 @@ int main(int argc, char **argv)
 
         u32 now = uptime();
         expire_toasts(now);
+        anim_step(now);
         if (now - last_sec >= 100) {
             last_sec = now;
             sample_tray();

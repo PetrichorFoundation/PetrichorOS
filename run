@@ -1,0 +1,64 @@
+#!/bin/sh
+# One command to build and boot Petrichor:   ./run
+#
+#   ./run             build everything and start the desktop in QEMU
+#   ./run iso         boot the install ISO (with a blank disk to install onto)
+#   ./run text        boot straight to the text console instead of the desktop
+#   ./run installed   boot the disk the installer wrote
+#   ./run --check     only check the tools and build, don't start QEMU
+#
+# Missing tools (clang, lld, qemu) are installed with Homebrew, apt, dnf or pacman if one is found.
+set -e
+cd "$(dirname "$0")"
+
+mode=${1:-desktop}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+missing=""
+have clang || missing="$missing clang"
+have ld.lld || missing="$missing lld"
+have qemu-system-x86_64 || missing="$missing qemu"
+have make || missing="$missing make"
+have cc || missing="$missing cc"
+
+if [ -n "$missing" ]; then
+    echo "run: missing:$missing"
+    if have brew; then
+        pkgs=""
+        for m in $missing; do
+            case $m in
+                lld|qemu) pkgs="$pkgs $m" ;;
+                *) echo "run: install the Xcode command line tools first: xcode-select --install"; exit 1 ;;
+            esac
+        done
+        echo "run: brew install$pkgs"
+        brew install $pkgs
+    elif have apt-get; then
+        echo "run: sudo apt-get install clang lld qemu-system-x86 make"
+        sudo apt-get install -y clang lld qemu-system-x86 make
+    elif have dnf; then
+        echo "run: sudo dnf install clang lld qemu-system-x86 make"
+        sudo dnf install -y clang lld qemu-system-x86 make
+    elif have pacman; then
+        echo "run: sudo pacman -S clang lld qemu-system-x86 make"
+        sudo pacman -S --needed --noconfirm clang lld qemu-system-x86 make
+    else
+        echo "run: please install clang, lld, make and qemu-system-x86_64, then run ./run again"
+        exit 1
+    fi
+fi
+
+echo "run: building..."
+make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)" all >build.log 2>&1 || { tail -30 build.log; echo "run: build failed (see build.log)"; exit 1; }
+rm -f build.log
+
+case $mode in
+    --check|check) echo "run: ok"; exit 0 ;;
+    desktop|"") exec make run ;;
+    iso) exec make run-iso ;;
+    installed) exec make run-installed ;;
+    text) exec qemu-system-x86_64 -m 128 -no-reboot -drive file=build/disk.img,format=raw,if=ide,index=0 \
+                 -nic user,model=rtl8139 -serial stdio -kernel build/kernel.bin -append mode=text ;;
+    *) echo "usage: ./run [desktop|iso|text|installed|--check]"; exit 2 ;;
+esac

@@ -18,6 +18,7 @@ mb_header:
 .long 0                            # load_end_addr: the whole file
 .long _end                         # bss_end_addr: keeps the loader's info block out of our .bss
 .long _start                       # entry_addr (read by the Petrichor bootloader at offset 28)
+.long _start64                     # not part of the Multiboot header: where the UEFI loader enters (offset 32)
 
 .section .bss
 .align 4096
@@ -39,6 +40,10 @@ boot_gdt:
 boot_gdt_ptr:
 .word 23
 .long boot_gdt
+.align 8
+boot_gdt_ptr64:
+.word 23
+.quad boot_gdt
 
 msg_no64: .asciz "Petrichor needs a 64-bit (x86_64) processor."
 
@@ -126,6 +131,62 @@ long_entry:
 1:  cli
     hlt
     jmp 1b
+
+# UEFI entry: the firmware loader has already put us in 64-bit mode with RAM identity-mapped.
+# Called with the Microsoft x64 convention: rcx = magic, rdx = pointer to a Multiboot-style info block.
+# Interrupts are off.  We switch to our own tables, GDT and stack because the firmware's live in memory we
+# will reuse.
+.global _start64
+_start64:
+    cli
+    mov %ecx, %esi                  # keep the magic and info pointer
+    mov %edx, %ebp
+    lea __bss_start(%rip), %rdi     # the loader copied only the file: clear .bss
+    lea _end(%rip), %rcx
+    sub %rdi, %rcx
+    xor %eax, %eax
+    cld
+    rep stosb
+    lea boot_stack_top(%rip), %rsp
+    lgdt boot_gdt_ptr64(%rip)
+
+    lea boot_pdpt(%rip), %rax       # identity map of the first GiB in 2 MiB pages
+    or $3, %rax
+    lea boot_pml4(%rip), %rdi
+    mov %rax, (%rdi)
+    lea boot_pd(%rip), %rax
+    or $3, %rax
+    lea boot_pdpt(%rip), %rdi
+    mov %rax, (%rdi)
+    lea boot_pd(%rip), %rdi
+    xor %ecx, %ecx
+1:  mov %rcx, %rax
+    shl $21, %rax
+    or $0x83, %rax
+    mov %rax, (%rdi,%rcx,8)
+    inc %ecx
+    cmp $512, %ecx
+    jb 1b
+    lea boot_pml4(%rip), %rax
+    mov %rax, %cr3
+    pushq $0x08                     # reload CS from our GDT
+    lea 2f(%rip), %rax
+    pushq %rax
+    lretq
+2:  mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %ss
+    xor %eax, %eax
+    mov %ax, %fs
+    mov %ax, %gs
+    mov %esi, %edi                  # kmain(magic, mbi)
+    mov %ebp, %esi
+    xor %ebp, %ebp
+    call kmain
+3:  cli
+    hlt
+    jmp 3b
 
 # void gdt_flush(struct gdt_ptr *p)
 .global gdt_flush

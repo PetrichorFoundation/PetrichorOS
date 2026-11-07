@@ -42,6 +42,18 @@ void kmain(u32 magic, u32 *mbi)
         bootinfo.fb_bpp = ((const u8 *)mbi)[108];
     }
 
+    if (mbi[0] & 0x80000000u)                       /* flag bit 31 (ours): mbi[30] = ACPI RSDP, from the UEFI loader */
+        bootinfo.rsdp = mbi[30];
+
+    if (mbi[0] & 0x40000000u) {                     /* flag bit 30 (ours): mbi[256] = count, then {start, end} pairs */
+        bootinfo.uefi = 1;
+        bootinfo.nranges = mbi[256] > 15 ? 15 : mbi[256];
+        for (u32 i = 0; i < bootinfo.nranges; i++) {
+            bootinfo.range[i][0] = mbi[257 + i * 2];
+            bootinfo.range[i][1] = mbi[258 + i * 2];
+        }
+    }
+
     static char cmdline[128];
     if ((mbi[0] & 4) && mbi[4]) {                   /* flags bit 2: a command line from the loader */
         const char *src = (const char *)(uptr)mbi[4];

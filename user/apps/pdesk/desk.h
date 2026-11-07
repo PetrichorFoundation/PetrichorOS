@@ -48,6 +48,7 @@ struct win {
     int used;
     int x, y, w, h;                    /* outer frame */
     int minimized, maximized;
+    int hide;                          /* not drawn: its open/restore animation is playing */
     int sx, sy, sw, sh;                /* geometry to restore after maximize */
     int minw, minh;
     char title[64];
@@ -70,6 +71,8 @@ int wm_installer_available(void);                           /* a second disk we 
 #define NWALL   5
 #define NACCENT 6
 extern int g_wall, g_accent_idx;
+extern int g_animations;                                    /* window and menu animations on/off */
+void anim_set(int on);                                      /* applies and saves */
 const char *theme_wall_name(int i);
 u32 theme_wall_color(int i);
 u32 theme_accent_color(int i);

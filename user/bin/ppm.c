@@ -20,7 +20,8 @@
 #define DBDIR     STATE "/db"
 #define INDEXFILE STATE "/index"
 #define CONFFILE  ROOT "/etc/ppm.conf"
-#define DEFAULT_REPO "http://10.0.2.2:8080"
+#define DEFAULT_REPO "https://raw.githubusercontent.com/krspybacon/petrichor-packages/main"
+#define LOCAL_REPO   "http://10.0.2.2:8080"       /* `make serve-repo` on the host, tried if the default repository is unreachable */
 
 struct pkg {
     char name[32], version[16], sha[65], deps[128], file[96], desc[128];
@@ -28,6 +29,7 @@ struct pkg {
 };
 
 static char repo[128] = DEFAULT_REPO;
+static int repo_from_config;
 static struct pkg *index_pkgs;
 static int nindex;
 
@@ -99,6 +101,15 @@ static int spit(const char *path, const void *data, int len)
 
 static void load_config(void)
 {
+    char *last = slurp(STATE "/repo", NULL);             /* the repository the last `ppm update` really used */
+    if (last) {
+        char *nl = strchr(last, '\n');
+        if (nl)
+            *nl = 0;
+        if (last[0] && strlen(last) < sizeof repo)
+            safestrcpy(repo, last, sizeof repo);
+        free(last);
+    }
     char *conf = slurp(CONFFILE, NULL);
     if (!conf)
         return;
@@ -110,6 +121,7 @@ static void load_config(void)
             n++;
         memcpy(repo, p, n);
         repo[n] = 0;
+        repo_from_config = 1;
     }
     free(conf);
 }
@@ -251,12 +263,21 @@ static int cmd_update(void)
     int len;
     snprintf(url, sizeof url, "%s/index", repo);
     int e = http_get(url, &body, &len);
+    if (e < 0 && !repo_from_config) {                   /* no repository chosen: also try the development server */
+        printf("(%s: %s)\nFetching %s/index\n", url, strerror(e), LOCAL_REPO);
+        snprintf(url, sizeof url, "%s/index", LOCAL_REPO);
+        e = http_get(url, &body, &len);
+        if (e == 0)
+            safestrcpy(repo, LOCAL_REPO, sizeof repo);
+    }
     if (e < 0)
         return die(url, e);
     e = spit(INDEXFILE, body, len);
     free(body);
     if (e < 0)
         return die(INDEXFILE, e);
+    char used[140];
+    spit(STATE "/repo", used, snprintf(used, sizeof used, "%s\n", repo));
     free(index_pkgs);
     index_pkgs = NULL;
     nindex = 0;

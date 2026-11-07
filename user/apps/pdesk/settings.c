@@ -99,6 +99,7 @@ static void st_draw(struct win *w, struct rect c)
         }
         y += 90;
         gfx_text(x, y, "Right-click the desktop and choose Change Wallpaper to cycle.", C_TEXT_DIM);
+        radio(x, y + 30, g_animations, "Animate windows, menus and the dock");
     } else if (s->tab == TAB_STARTUP) {
         gfx_text(x, y, "When Petrichor starts", C_TEXT);
         radio(x, y + 34, !s->autostart_text, "Start the graphical desktop");
@@ -184,6 +185,9 @@ static void st_mouse(struct win *w, int x, int y, int kind)
                 theme_set(g_wall, i);
                 wm_invalidate(w);
             }
+        } else if (cy >= 236 && cy < 258 && cx >= 0 && cx < 320) {
+            anim_set(!g_animations);
+            wm_invalidate(w);
         }
     } else if (s->tab == TAB_STARTUP) {
         if (cx >= 0 && cx < 300 && cy >= 32 && cy < 52)

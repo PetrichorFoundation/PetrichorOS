@@ -127,6 +127,9 @@ extern int tty_fg_pgrp;
 struct bootinfo {
     u32 kimg, kimg_size;                         /* pristine copy of the boot image kernel, for the installer */
     u32 fb_addr, fb_pitch, fb_w, fb_h, fb_bpp;   /* VESA linear framebuffer, if the bootloader set one up */
+    u32 rsdp;                                    /* ACPI RSDP address when the firmware loader supplied it (UEFI) */
+    u32 uefi;                                    /* started by the UEFI loader, not the BIOS bootloader */
+    u32 nranges, range[16][2];                   /* usable RAM above 1 MiB, from the UEFI memory map (else empty) */
 };
 extern struct bootinfo bootinfo;
 

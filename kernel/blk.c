@@ -57,6 +57,10 @@ int blk_write(int dev, u32 lba, u32 n, const void *buf)
 static void find_boot_disk(void)
 {
     const u8 *ram = (const u8 *)0x7E00;
+    if (bootinfo.uefi) {                             /* the boot disk holds an EFI System Partition: never format it */
+        boot_disk = -1;
+        return;
+    }
     if (memcmp(ram + 28, "PSG2", 4) != 0) {         /* not started by our bootloader (e.g. QEMU -kernel) */
         boot_disk = ndev > 0 ? 0 : -1;
         return;

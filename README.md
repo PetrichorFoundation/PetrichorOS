@@ -14,9 +14,15 @@ no borrowed kernel or libc: the kernel, C library, shell and utilities are all i
 
 ## Quick start (macOS or Linux host)
 
+The one-line way: from the repository folder, run `./run`. It checks for the tools (installing them with
+Homebrew, apt, dnf or pacman if they're missing), builds everything and starts the desktop in QEMU.
+`./run iso`, `./run text` and `./run installed` start the other modes (`./run --check` only builds).
+
 ```sh
 brew install lld qemu     # plus clang (Xcode command line tools); the build uses qemu-system-x86_64
 make run                  # boots build/disk.img: boot menu, then straight into the desktop
+make run-uefi             # boot the GPT/EFI disk image with OVMF firmware (UEFI)
+make run-uefi-iso         # boot the ISO as a UEFI machine would
 make run-nographic        # same, with the serial console in your terminal (Ctrl-A X quits)
 make run-multiboot        # skip the bootloader: QEMU loads the kernel directly
 ```
@@ -80,6 +86,17 @@ port 8080), then inside Petrichor: `ppm update`, `ppm search`, `ppm install lolc
 Files you put in `/disk` survive reboots (`make` updates the bootloader and kernel inside
 `build/disk.img` but leaves the data partition alone; `make clean` deletes the disk).
 
+## UEFI
+
+Petrichor boots on both BIOS and UEFI machines. `boot/uefi.c` is a UEFI application (`BOOTX64.EFI`, built as PE32+
+with clang and `lld-link`) that loads `KERNEL.BIN` from the EFI System Partition to 1 MiB, picks a 1024x768 GOP
+framebuffer, reads the memory map (the kernel learns the usable ranges, holes included) and the ACPI tables, leaves
+the firmware and jumps to the kernel's 64-bit entry point, `_start64`. `tools/mkefi.c` builds the FAT16 ESP image and
+a GPT disk image (`build/uefi.img`, usable on a USB stick or in a VM); `petrichor.iso` carries an El Torito UEFI entry
+and an 0xEF partition, so the same ISO or stick boots under BIOS or UEFI. Limits: a UEFI boot is a live session
+(it never touches the boot disk, so `/disk` stays empty), and the installer is hidden, because it writes
+BIOS boot code; the loader also needs 1 MiB to be free RAM (it is on common firmware) and a 32-bit BGR GOP mode.
+
 ## What's in it
 
 **Bootloader** (`boot/`, from scratch, real-mode assembly). BIOS loads the 512-byte MBR, which
@@ -141,7 +158,9 @@ XFCE-style desktop, written from scratch on top of the framebuffer and input dev
   damage-tracked repainting and a software mouse cursor
 - panel with Applications menu, taskbar, system tray (network, CPU, memory) and clock with a calendar
   popup; a floating dock; desktop icons; right-click context menu; toast notifications
-- appearance: five wallpapers and six accent colors, saved in `/disk/etc/pdesk.conf`
+- appearance: five wallpapers and six accent colors, saved in `/disk/etc/pdesk.conf`; animations (windows open,
+  close, minimize and restore by scaling and fading a snapshot, menus unroll, the dock lifts hovered icons and
+  bounces launching ones, notifications slide in) that Settings can turn off
 - apps: **Web Browser** (below), **Terminal** (runs `sh` over pipes, ANSI colors, wheel/PgUp scrollback, `^C`/`^D`),
   **File Manager**, **Text Editor**, **System Monitor**, **Software** (a front-end for `ppm`:
   browse, install, remove, upgrade), **Settings** (appearance, startup mode, system info,
@@ -199,6 +218,11 @@ and SHA-256 before writing anything, install under `/disk` (so they persist), re
 package that others need, and the shell finds programs in `/bin` and `/disk/bin`. Host tools:
 `tools/mkppk` builds packages; `make repo` builds the sample repository from `packages/`
 (`cowsay`, `fortune`, `lolcow`, `calc`, `hd`); `make serve-repo` serves it.
+
+By default `ppm` downloads from a public GitHub repository, `krspybacon/petrichor-packages`, over HTTPS (it
+falls back to the development server below if that can't be reached), so on a running Petrichor
+`ppm update && ppm install cowsay` just works. `tools/publish-packages.sh OWNER/petrichor-packages` builds the
+repository and pushes it to GitHub; `ppm repo URL` points a machine at a different repository.
 
 **Icons.** The desktop's icons are drawn at run time by a small anti-aliased vector rasterizer
 (`user/apps/pdesk/icons.c`: rounded rectangles, ellipses, polygons, gradients, soft shadows) into a

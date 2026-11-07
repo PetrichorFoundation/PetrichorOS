@@ -21,6 +21,8 @@ static const u8 *map_table(u32 phys)
 
 static u32 find_rsdt(void)
 {
+    if (bootinfo.rsdp && !memcmp((void *)(uptr)bootinfo.rsdp, "RSD PTR ", 8))
+        return *(u32 *)(uptr)(bootinfo.rsdp + 16);                /* RsdtAddress */
     u32 ebda = (*(volatile u16 *)0x40E) << 4;
     u32 ranges[2][2] = {{ebda, ebda + 1024}, {0xE0000, 0x100000}};
     for (int r = 0; r < 2; r++) {

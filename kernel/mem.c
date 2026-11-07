@@ -377,29 +377,67 @@ void mem_init(u32 ram_bytes)
     u32 heap_size = ram_bytes / 4;
     if (heap_size < (8u << 20)) heap_size = 8u << 20;
     if (heap_size > (96u << 20)) heap_size = 96u << 20;
-    u32 heap_start = ((u32)(uptr)_end + 4095) & ~4095u;
-    u32 low_free_start = 0, low_free_end = 0;
-    if (bootinfo.kimg && bootinfo.kimg + bootinfo.kimg_size > heap_start) {
-        low_free_start = heap_start;                          /* the gap before the kernel copy is ordinary RAM */
-        low_free_end = bootinfo.kimg & ~4095u;
-        heap_start = (bootinfo.kimg + bootinfo.kimg_size + 4095) & ~4095u;
-    }
-    u32 heap_end = (heap_start + heap_size) & ~4095u;
-    if (heap_end > ram_bytes)
-        panic("not enough RAM (%u MiB)", ram_bytes >> 20);
-    heap_init(heap_start, heap_end - heap_start);
+    u32 heap_start = ((u32)(uptr)_end + 4095) & ~4095u, heap_end;
 
-    /* Frames below the end of the heap belong to the firmware/kernel/heap. */
     memset(bitmap, 0xFF, sizeof bitmap);
-    for (u32 f = heap_end / PAGE_SIZE; f < total_frames; f++) {
-        frame_clear(f);
-        nfree++;
+    if (bootinfo.nranges) {
+        /* UEFI told us exactly which RAM is usable (it has holes).  The heap goes into the largest range
+         * above the kernel; every other usable frame above the kernel image joins the free pool. */
+        u32 best_s = 0, best_size = 0;
+        for (u32 i = 0; i < bootinfo.nranges; i++) {
+            u32 s = bootinfo.range[i][0] > heap_start ? bootinfo.range[i][0] : heap_start, e = bootinfo.range[i][1];
+            if (e > ram_bytes) e = ram_bytes;
+            s = (s + 4095) & ~4095u;
+            if (e > s && e - s > best_size) {
+                best_s = s;
+                best_size = e - s;
+            }
+        }
+        if (best_size < (4u << 20))
+            panic("not enough usable RAM");
+        if (heap_size > best_size / 2)
+            heap_size = best_size / 2;
+        heap_start = best_s;
+        heap_end = (heap_start + heap_size) & ~4095u;
+        heap_init(heap_start, heap_end - heap_start);
+        u32 first_free = 0;
+        for (u32 i = 0; i < bootinfo.nranges; i++) {
+            u32 s = bootinfo.range[i][0] > ((u32)(uptr)_end + 4095 & ~4095u) ? bootinfo.range[i][0] : ((u32)(uptr)_end + 4095 & ~4095u);
+            u32 e = bootinfo.range[i][1] > ram_bytes ? ram_bytes : bootinfo.range[i][1];
+            for (u32 f = (s + 4095) / PAGE_SIZE; f < e / PAGE_SIZE; f++) {
+                u32 pa = f * PAGE_SIZE;
+                if (pa >= heap_start && pa < heap_end)
+                    continue;
+                frame_clear(f);
+                nfree++;
+                if (!first_free)
+                    first_free = f;
+            }
+        }
+        hint = first_free;
+    } else {
+        u32 low_free_start = 0, low_free_end = 0;
+        if (bootinfo.kimg && bootinfo.kimg + bootinfo.kimg_size > heap_start) {
+            low_free_start = heap_start;                      /* the gap before the kernel copy is ordinary RAM */
+            low_free_end = bootinfo.kimg & ~4095u;
+            heap_start = (bootinfo.kimg + bootinfo.kimg_size + 4095) & ~4095u;
+        }
+        heap_end = (heap_start + heap_size) & ~4095u;
+        if (heap_end > ram_bytes)
+            panic("not enough RAM (%u MiB)", ram_bytes >> 20);
+        heap_init(heap_start, heap_end - heap_start);
+
+        /* Frames below the end of the heap belong to the firmware/kernel/heap. */
+        for (u32 f = heap_end / PAGE_SIZE; f < total_frames; f++) {
+            frame_clear(f);
+            nfree++;
+        }
+        for (u32 f = low_free_start / PAGE_SIZE; f < low_free_end / PAGE_SIZE; f++) {
+            frame_clear(f);
+            nfree++;
+        }
+        hint = low_free_start ? low_free_start / PAGE_SIZE : heap_end / PAGE_SIZE;
     }
-    for (u32 f = low_free_start / PAGE_SIZE; f < low_free_end / PAGE_SIZE; f++) {
-        frame_clear(f);
-        nfree++;
-    }
-    hint = low_free_start ? low_free_start / PAGE_SIZE : heap_end / PAGE_SIZE;
 
     /* Identity-map all RAM (supervisor only) in 2 MiB pages. */
     kernel_pd = (u64 *)(uptr)pmm_alloc();
