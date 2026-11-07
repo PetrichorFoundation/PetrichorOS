@@ -36,14 +36,14 @@ static u32 find_rsdt(void)
 }
 
 /* Powers the machine off; returns only if ACPI isn't usable. */
-void acpi_poweroff(void)
+static const u8 *find_fadt(void)
 {
     u32 rsdt_phys = find_rsdt();
     if (!rsdt_phys)
-        return;
+        return NULL;
     const u8 *rsdt = map_table(rsdt_phys);
     if (!rsdt)
-        return;
+        return NULL;
     u32 n = (((const struct sdt *)rsdt)->len - sizeof(struct sdt)) / 4;
 
     const u8 *fadt = NULL;
@@ -53,6 +53,43 @@ void acpi_poweroff(void)
         if (h && !memcmp(h->sig, "FACP", 4))
             fadt = map_table(t);
     }
+    return fadt;
+}
+
+/* Restarts the machine: the ACPI reset register first (the way modern PCs, which may have no keyboard controller,
+ * expect it), then the PCI reset port, the keyboard controller, and finally a triple fault. */
+void acpi_reset(void)
+{
+    const u8 *fadt = find_fadt();
+    if (fadt && ((const struct sdt *)fadt)->len >= 129 && (*(const u32 *)(fadt + 112) & (1u << 10))) {
+        u8 space = fadt[116], val = fadt[128];
+        u64 addr = *(const u64 *)(fadt + 120);
+        if (space == 1 && addr && addr < 0x10000)
+            outb((u16)addr, val);
+        else if (space == 0 && addr) {
+            volatile u8 *r = mmio_map(addr, 1);
+            if (r)
+                *r = val;
+        }
+        for (volatile int i = 0; i < 10000000; i++)
+            ;
+    }
+    outb(0xCF9, 0x02);                                                /* PCI reset control: hard reset */
+    for (volatile int i = 0; i < 100000; i++)
+        ;
+    outb(0xCF9, 0x06);
+    for (volatile int i = 0; i < 10000000; i++)
+        ;
+    outb(0x64, 0xFE);                                                 /* keyboard controller: pulse reset */
+    for (volatile int i = 0; i < 10000000; i++)
+        ;
+    struct { u16 limit; u64 base; } __attribute__((packed)) none = {0, 0};
+    __asm__ volatile("lidt %0; int3" : : "m"(none));                   /* triple fault */
+}
+
+void acpi_poweroff(void)
+{
+    const u8 *fadt = find_fadt();
     if (!fadt)
         return;
     u32 dsdt_phys = *(const u32 *)(fadt + 40), smi_cmd = *(const u32 *)(fadt + 48);

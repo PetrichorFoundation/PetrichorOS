@@ -11,6 +11,7 @@ static void no_irq_poll(void) {}
 static const struct nic_driver drivers[] = {
     {"e1000", e1000_init, e1000_send, e1000_irq, e1000_poll},
     {"virtio-net", virtio_net_init, virtio_net_send, virtio_net_irq, virtio_net_poll},
+    {"rtl8168", rtl8168_init, rtl8168_send, rtl8168_irq, rtl8168_poll},
     {"rtl8139", rtl8139_init, rtl8139_send, rtl8139_irq, no_poll},
 };
 static const struct nic_driver *active;

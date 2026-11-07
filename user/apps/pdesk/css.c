@@ -53,7 +53,9 @@ struct simple {
     int nth_a, nth_b;
     struct simple *neg;
 };
-enum { PS_FIRST = 1, PS_LAST = 2, PS_ROOT = 4, PS_EMPTY = 8, PS_LINK = 16 };
+enum { PS_FIRST = 1, PS_LAST = 2, PS_ROOT = 4, PS_EMPTY = 8, PS_LINK = 16, PS_HOVER = 32, PS_FOCUS = 64, PS_CHECKED = 128 };
+
+struct node *css_hover, *css_focus;
 
 struct rule {
     struct simple *sel;
@@ -509,6 +511,16 @@ static int parse_simple(struct page *pg, const char *p, const char *e, struct si
             else if (ieq(a, n, "root")) s->pseudo |= PS_ROOT;
             else if (ieq(a, n, "empty")) s->pseudo |= PS_EMPTY;
             else if (ieq(a, n, "link") || ieq(a, n, "any-link")) s->pseudo |= PS_LINK;
+            else if (ieq(a, n, "hover")) { s->pseudo |= PS_HOVER; pg->has_dyn_css = 1; }
+            else if (ieq(a, n, "focus") || ieq(a, n, "focus-within") || ieq(a, n, "focus-visible")) s->pseudo |= PS_FOCUS;
+            else if (ieq(a, n, "checked")) s->pseudo |= PS_CHECKED;
+            else if (ieq(a, n, "disabled") && s->nattr < 3) {         /* same as [disabled] */
+                s->attr[s->nattr].n = "disabled";
+                s->attr[s->nattr].nl = 8;
+                s->attr[s->nattr].op = 0;
+                s->nattr++;
+            }
+            else if (ieq(a, n, "visited") || ieq(a, n, "active")) return 0;
             else if ((ieq(a, n, "nth-child") || ieq(a, n, "not")) && p < e && *p == '(') {
                 const char *a2 = ++p;
                 int depth = 1;
@@ -621,6 +633,63 @@ static void add_selector(struct page *pg, const char *p, const char *e, struct d
     simple_mask(&r.sel[n - 1], r.mask);
     r.key = (u32)origin << 31 | specificity(&r) << 16 | (order & 0xFFFF);
     add_rule(pg, &r);
+}
+
+static int match_from(const struct rule *r, int i, struct node *n);
+
+/* Does n match a selector list (as in querySelector)?  1 yes, 0 no, -1 can't parse it. */
+int css_matches(struct page *pg, struct node *n, const char *sel)
+{
+    if (!n || n->type != 0)
+        return 0;
+    const char *p = sel, *end = sel + strlen(sel);
+    int any_valid = 0;
+    while (p < end) {
+        const char *e = p;
+        int depth = 0;
+        while (e < end && (depth || *e != ',')) {
+            if (*e == '(' || *e == '[') depth++;
+            if (*e == ')' || *e == ']') depth--;
+            e++;
+        }
+        struct simple tmp[12];
+        int cnt = 0, bad = 0;
+        char comb = 0;
+        const char *q = skip_ws(p, e);
+        while (q < e && !bad) {
+            const char *a = q;
+            int d2 = 0;
+            while (q < e && (d2 || !(is_space(*q) || *q == '>' || *q == '+' || *q == '~'))) {
+                if (*q == '(' || *q == '[') d2++;
+                if (*q == ')' || *q == ']') d2--;
+                q++;
+            }
+            if (q > a) {
+                if (cnt >= 12 || !parse_simple(pg, a, q, &tmp[cnt])) { bad = 1; break; }
+                tmp[cnt].comb = comb;
+                cnt++;
+                comb = ' ';
+            }
+            const char *r = skip_ws(q, e);
+            if (r < e && (*r == '>' || *r == '+' || *r == '~')) {
+                comb = *r;
+                r = skip_ws(r + 1, e);
+            }
+            if (r == a) { bad = 1; break; }
+            q = r;
+        }
+        if (!bad && cnt) {
+            any_valid = 1;
+            struct rule r;
+            memset(&r, 0, sizeof r);
+            r.sel = tmp;
+            r.nsel = cnt;
+            if (match_from(&r, cnt - 1, n))
+                return 1;
+        }
+        p = e < end ? e + 1 : e;
+    }
+    return any_valid ? 0 : -1;
 }
 
 static int media_ok(const char *p, const char *e)
@@ -804,6 +873,13 @@ static int match_simple(struct node *n, const struct simple *s)
     }
     if (s->pseudo & PS_ROOT) if (n->tag != TG_HTML) return 0;
     if (s->pseudo & PS_LINK) if (n->tag != TG_A || !attr_val(n, "href")) return 0;
+    if (s->pseudo & PS_HOVER) {
+        struct node *x = css_hover;
+        while (x && x != n) x = x->parent;
+        if (!x) return 0;
+    }
+    if (s->pseudo & PS_FOCUS) if (!css_focus || css_focus != n) return 0;
+    if (s->pseudo & PS_CHECKED) if (!attr_val(n, "checked")) return 0;
     if (s->pseudo & PS_FIRST) if (prev_elem(n)) return 0;
     if (s->pseudo & PS_LAST) { for (struct node *x = n->next; x; x = x->next) if (x->type == 0) return 0; }
     if (s->pseudo & PS_EMPTY) { for (struct node *x = n->first; x; x = x->next) if (x->type == 0 || x->tlen) return 0; }
@@ -1621,6 +1697,7 @@ static const char UA_CSS[] =
     "border-radius:3px;padding:2px 8px;color:#000;text-align:center}"
     "input[type=checkbox],input[type=radio],input[type=image]{border:0;padding:0;background:transparent}"
     "input[type=hidden]{display:none}"
+    "input:focus,textarea:focus,select:focus{border-color:#1a73e8}"
     "fieldset{margin:8px 2px;padding:6px 12px;border:2px groove #ccc}"
     "details>summary{display:list-item}"
     "[hidden]{display:none}";
@@ -1633,6 +1710,7 @@ void css_restyle(struct page *p, int viewport_w)
     g_vw = viewport_w;
     g_vh = 560;
     css_free_rules(p);
+    p->has_dyn_css = 0;
     int order = 0;
     g_sheet_url = NULL;
     parse_sheet(p, UA_CSS, UA_CSS + sizeof UA_CSS - 1, 0, &order, 0);

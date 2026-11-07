@@ -32,11 +32,14 @@ static u16 raw_code(u8 sc, int was_ext)
         case 0x52: return KEY_INSERT;
         case 0x1C: return '\n';
         case 0x35: return '/';
+        case 0x37: return KEY_PRINT;
         }
         return 0;
     }
     if (sc >= 0x3B && sc <= 0x44)
         return KEY_F1 + (sc - 0x3B);
+    if (sc == 0x57 || sc == 0x58)
+        return KEY_F1 + 10 + (sc - 0x57);
     if (sc >= sizeof normal - 1)
         return 0;
     char c = shift ? shifted[sc] : normal[sc];
@@ -49,6 +52,11 @@ void kbd_irq(void)
 {
     u8 sc = inb(0x60);
     random_event(sc);
+    kbd_scancode(sc);
+}
+
+void kbd_scancode(u8 sc)
+{
     if (sc == 0xE0) {
         ext = 1;
         return;

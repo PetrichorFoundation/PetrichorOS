@@ -173,7 +173,7 @@ static void in_draw(struct win *w, struct rect c)
                 gfx_frame(x, y + 2, 14, 14, i == s->sel ? C_WHITE : RGB(0x60, 0x68, 0x70));
                 if (i == s->sel) gfx_fill(x + 4, y + 6, 6, 6, C_WHITE);
                 char t[96];
-                static const char *const bus[] = {"IDE", "SATA", "NVMe"};
+                static const char *const bus[] = {"IDE", "SATA", "NVMe", "USB", "virtio"};
                 snprintf(t, sizeof t, "%s  %s  %u MiB  %s", d->name, bus[d->bus < 3 ? d->bus : 0], d->sectors / 2048, d->model);
                 gfx_text(x + 26, y + 2, t, i == s->sel ? C_WHITE : C_TEXT);
                 if (s->note[i][0])

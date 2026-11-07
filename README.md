@@ -58,11 +58,11 @@ first real boot as an experiment on a machine you can afford to wipe. What Petri
 
 | Needs | Details |
 | --- | --- |
-| BIOS boot | Legacy/CSM/"BIOS" boot mode. There is no UEFI loader, so a UEFI-only machine won't boot it. |
-| Keyboard and mouse | PS/2, or USB with the firmware's "legacy USB support" (it emulates PS/2). There are no USB drivers; USB mice often aren't emulated, so the desktop may have a keyboard but no pointer. |
-| Disk | SATA in **AHCI** mode, **NVMe**, or legacy IDE. RAID/"Intel RST" mode, USB drives and SD cards aren't supported. |
-| Display | A 1024x768 32-bit VESA mode from the BIOS (most have one). Otherwise you get the text console only. |
-| Network | Only the RTL8139 (rare on real PCs), so expect no network. |
+| Boot mode | Legacy/CSM BIOS or UEFI (x86_64); the same ISO or USB stick boots both. |
+| Keyboard and mouse | PS/2, or USB on an **xHCI** (USB 3) controller: boot-protocol keyboards and mice plugged straight into a port. Not supported: devices behind a USB hub (including many front-panel ports and docks), hot-plugging, wireless receivers that aren't boot-protocol, touchscreens and tablets, and old EHCI/OHCI/UHCI-only controllers. |
+| Disk | SATA in **AHCI** mode, **NVMe**, legacy IDE, **virtio-blk**, and **USB flash drives/disks** (xHCI, 512-byte sectors, not behind a hub). RAID/"Intel RST" mode and SD card readers on non-USB buses aren't supported. |
+| Display | A 32-bit linear framebuffer: VESA (BIOS) or GOP (UEFI). The boot loader reads the monitor's EDID and uses its native resolution (largest mode up to 2560x1600); with no EDID it keeps 1024x768 (BIOS) or the firmware's current mode (UEFI). |
+| Network | Intel e1000/e1000e (I210/I211 IDs accepted, untested), virtio-net, Realtek RTL8111/8168 (written but untested) and RTL8139. No Wi-Fi or USB adapters. |
 
 To write the ISO to a USB stick on macOS (double-check the disk number: this overwrites the whole stick):
 
@@ -80,8 +80,9 @@ not a dual-boot installer. Remove the stick and boot from the disk. The ISO also
 QEMU/VirtualBox/VMware. If you boot the stick and it shows no disks, the machine's storage mode
 isn't one of the supported ones.
 
-**Package manager demo.** In one terminal on the host run `make serve-repo` (serves `build/repo` on
-port 8080), then inside Petrichor: `ppm update`, `ppm search`, `ppm install lolcow`, `lolcow`.
+**Package manager demo.** Inside Petrichor: `ppm update`, `ppm search`, `ppm install lolcow`, `lolcow`. Packages come
+from the separate [Petrichor-Packages](https://github.com/krspybacon/Petrichor-Packages) repository; this repository
+holds no packages.
 
 Files you put in `/disk` survive reboots (`make` updates the bootloader and kernel inside
 `build/disk.img` but leaves the data partition alone; `make clean` deletes the disk).
@@ -137,15 +138,16 @@ to the desktop when it exits.
 | Memory | Physical frame bitmap, first-fit kernel heap, 2-level paging, per-process address spaces, shared device-memory mappings |
 | Processes | `fork`, `exec` (ELF64 and `#!` scripts), `wait`, `exit`, `kill`, process groups, preemptive round-robin scheduler for user code, sleep/wakeup with timeouts, `poll` |
 | Filesystems | A RAM filesystem for `/` (unpacked from an initrd) and **PFS**, an on-disk filesystem mounted at `/disk` (below) |
-| Disk | A block-device layer with three drivers: legacy IDE (PIO), **AHCI/SATA** (DMA) and **NVMe**; raw `/dev/hda`.. block devices; the boot disk is identified by content, so any bus works; 64-block write-through buffer cache |
+| Disk | A block-device layer with five drivers: legacy IDE (PIO), **AHCI/SATA** (DMA), **NVMe**, **virtio-blk** and **USB mass storage** (xHCI, Bulk-Only/SCSI); raw `/dev/hda`.. block devices; the boot disk is identified by content, so any bus works; 64-block write-through buffer cache |
 | Power | ACPI soft-off (RSDP/RSDT/FADT/DSDT `_S5_`), keyboard-controller reset |
 | Network | PCI scan, RTL8139 driver, ARP, IPv4, ICMP, UDP, TCP client (below) |
-| Graphics and input | Bochs/QEMU VBE linear framebuffer (1024x768x32), raw keyboard events (arrows, F-keys, modifiers), PS/2 mouse with scroll wheel, `/dev/input` event stream, CMOS real-time clock |
+| Graphics and input | Linear framebuffer at the monitor's native size (VBE/GOP, chosen from EDID; Bochs dispi under QEMU `-kernel`), raw keyboard events (arrows, F-keys, modifiers), PS/2 and USB keyboards and mice with scroll wheel, `/dev/input` event stream, CMOS real-time clock |
 | I/O | Pipes, sockets, VGA text console with ANSI colors, 16550 serial, PS/2 keyboard, a cooked tty with line editing, `^C`, `^D` |
 | Isolation | User pointers are validated; faults and wild pointers kill only the offending process |
 
 **PFS** has a superblock, inode and block bitmaps, an inode table, and 4 KiB blocks. Inodes have
-12 direct blocks plus one indirect block (files up to ~4 MiB, 1024 inodes). Directories are files
+12 direct blocks, one indirect and one double-indirect block (files up to 4 GiB; partitions up to 16 GiB;
+16384 inodes on new filesystems; filesystems made by older versions keep working). Directories are files
 of 32-byte entries. Every write goes straight to disk, so there is nothing to `sync`. The VFS
 dispatches per inode, crosses mount points in both directions (including `..` and `getcwd`),
 returns `EXDEV` for cross-device renames, and can `exec` programs stored on disk. The kernel
@@ -153,13 +155,14 @@ formats the partition on first boot.
 
 **Networking.** Drivers for the common wired cards, picked automatically at boot: Intel PRO/1000 ("e1000", the default
 card in VirtualBox and VMware and in many physical Intel NICs, including QEMU's e1000 and e1000e/82574L), virtio-net
-(QEMU/KVM and most cloud VMs) and the Realtek RTL8139. A DHCP client gets the address, netmask, gateway and DNS server
+(QEMU/KVM and most cloud VMs) the Realtek RTL8111/8168/8101 family and the RTL8139. A DHCP client gets the address, netmask, gateway and DNS server
 from whatever network it is on; if no DHCP server answers within about 15 seconds it falls back to QEMU's user-mode
 defaults (`10.0.2.15`). Sockets are file descriptors: `socket`, `connect`, `bind`, `sendto`, `recvfrom`, plus ordinary
 `read`/`write`; a socket call made while DHCP is still running waits for it. TCP is a client with stop-and-wait
 transmission, retransmission with timeouts, and orderly close; there is no listen/accept yet. Not supported: Wi-Fi,
-USB network adapters, Realtek RTL8168/8111 gigabit cards (very common in PCs, but not emulated by QEMU, so I couldn't
-test a driver), newer Intel I217-I225 cards, IPv6, and DHCP lease renewal. Tested in QEMU with rtl8139, e1000, e1000e and
+USB network adapters, newer Intel I217-I225 cards (their IDs are not accepted: those chips need PHY power-up
+steps that aren't implemented), IPv6, and DHCP lease renewal. The RTL8168 driver is written to the chip's documented
+ring interface but QEMU has no model of it, so it has never run on real hardware. Tested in QEMU with rtl8139, e1000, e1000e and
 virtio-net, on the default network and on a different subnet.
 
 **Desktop** (`user/apps/pdesk`; starts automatically at boot, or run `pdesk`). Real XFCE can't run
@@ -224,7 +227,7 @@ byte comparison. Big-integer code is not constant-time. Randomness comes from `/
 SHA-256 pool stirred by RDRAND (where the CPU has it) and by timing jitter from interrupts, which is
 solid on real hardware but weaker under an emulator without RDRAND.
 
-**GrapeJuice** (`packages/grapejuice`, install with `ppm install grapejuice`) is a small Windows translation layer:
+**GrapeJuice** (in Petrichor-Packages, install with `ppm install grapejuice`) is a small Windows translation layer:
 `grape program.exe [args]` loads a 64-bit Windows program (PE32+), applies its relocations, resolves its imports
 against GrapeJuice's own implementations of the Windows API, and runs it. Typing `program.exe` in the shell (or
 double-clicking it in the File Manager) runs it through `grape`.
@@ -252,8 +255,8 @@ resolved; calling one it lacks stops the program with its name. Windows can't be
 install | remove | upgrade | list | files | repo`. Installs resolve dependencies first, verify size
 and SHA-256 before writing anything, install under `/disk` (so they persist), refuse to remove a
 package that others need, and the shell finds programs in `/bin` and `/disk/bin`. Host tools:
-`tools/mkppk` builds packages; `make repo` builds the sample repository from `packages/`
-(`cowsay`, `fortune`, `lolcow`, `calc`, `hd`); `make serve-repo` serves it.
+`tools/mkppk` builds packages and `make package PKGDIR=... OUT=...` builds one package directory; the
+Petrichor-Packages repository's own `make` runs it for every package, and its `make serve` serves the result.
 
 By default `ppm` downloads from a public GitHub repository, `krspybacon/Petrichor-Packages`, over HTTPS (it
 falls back to the development server below if that can't be reached), so on a running Petrichor
@@ -285,7 +288,6 @@ kernel/     the kernel (boot.S, isr.S, console, mem, proc, fs, pfs, ata, rtl8139
 lib/        string and printf code shared by kernel and userland
 include/    abi.h: the syscall/errno/struct contract between kernel and user
 user/       libc (user/lib), programs (user/bin) and multi-file apps such as the desktop (user/apps)
-packages/   sample packages for the repository (package metadata, sources, data files)
 rootfs/     files copied into the root filesystem (/etc/motd, ...)
 tools/      host tools: mkinitrd (root image), mkdisk (bootloader + kernel -> disk image), mkppk (packages),
             mkroots.py (trusted roots for HTTPS), gen_crypto_tables.py (SHA-512/AES tables)
@@ -322,21 +324,18 @@ QEMU's monitor (injected mouse/keys plus screenshots), a two-disk setup, and a h
 ## Limits and ideas
 
 Single CPU, no SMP. The kernel is 64-bit but only uses the low 4 GiB (at most 512 MiB of RAM is used), and needs an x86_64 CPU, and disks over 2 TiB aren't
-addressed fully. The root filesystem isn't persistent and PFS has no journal and caps files at ~4 MiB.
+addressed fully. The root filesystem isn't persistent and PFS has no journal and file names are limited to 27 characters.
 Disk drivers are polled (no interrupts), AHCI/NVMe use one queue and one command at a time, and NVMe
 needs 512-byte sectors. The installer copies the whole boot region and has no partitioning, no
-dual-boot support and no choice of what to install. Boot is BIOS-only (no UEFI), and there are no USB
-drivers (keyboard and mouse rely on firmware PS/2 emulation; USB sticks can boot it but can't be
-read once it is running). The network stack has no IP fragmentation, DHCP renewal,
-TCP listen/accept or window-based flow control, and Wi-Fi, USB adapters and the Realtek RTL8168 aren't supported. The desktop needs a
-1024x768 32-bit VESA mode and runs in a single process (apps are built in rather than separate
+dual-boot support and no choice of what to install. USB support is xHCI only, polled, with no hubs and no hot-plug. The network stack has no IP fragmentation, DHCP renewal,
+TCP listen/accept or window-based flow control, and Wi-Fi and USB adapters aren't supported. The desktop needs a
+32-bit framebuffer and runs in a single process (apps are built in rather than separate
 clients of a window server). Terminal lines don't reflow when a window is resized. `ppm` has no
 package signatures beyond SHA-256 in the index (the repository can now be served over HTTPS). There are no real
 signals (`kill` terminates) and no copy-on-write `fork`. The bitmap font is the standard VGA text-mode
 font as rendered by QEMU's VGA BIOS (LGPL-licensed); swap in your own if you need different terms.
 
-Natural next steps: TLS 1.3, JavaScript, SVG/WebP and positioned elements for the browser, UEFI boot (and GPT), USB (xHCI) keyboard/mouse/storage drivers, more NICs (e1000,
-RTL8168), AHCI/NVMe interrupts and multiple queues, selectable display modes, partitioning and
+Natural next steps: TLS 1.3, JavaScript, SVG/WebP and positioned elements for the browser, UEFI boot (and GPT), USB hubs/hot-plug and EHCI, more NICs (Wi-Fi, USB), AHCI/NVMe interrupts and multiple queues, real mode-setting GPU drivers, partitioning and
 dual-boot in the installer, a window-server protocol, DHCP and `listen`/`accept`, a journal, signed
 packages, real signals, a 64-bit port.
 
@@ -344,3 +343,38 @@ packages, real signals, a 64-bit port.
 
 Petrichor OS is released under the [MIT License](LICENSE), except for the 8x16 bitmap font in
 `lib/font8x16.h`, which is the standard VGA text-mode font (LGPL-licensed; see above).
+
+## Display, USB and drivers added later
+
+**Display.** The BIOS stage 2 reads the monitor's EDID (VBE/DDC) and the UEFI loader reads the EDID protocol, then
+both pick the largest 32-bit BGR mode that fits the monitor's preferred resolution. The desktop (`pdesk`) takes its
+size from the framebuffer. **Settings > Display** shows the screen mode and the monitor's preferred mode and refresh
+rate, and lets you draw the desktop at a smaller size (it is stretched to the screen) or at the native size; the
+choice and the animation frame-rate cap are saved in `/disk/etc/pdesk.conf`. What it can't do: change the real
+video mode or refresh rate on hardware (that takes a GPU-specific driver; VBE/GOP only offer what was set at boot),
+and sync to vblank. The frame-rate cap paces animation to the monitor's rate (default) but is limited by the kernel's
+100 Hz clock to about 100 fps, and frames land on 10 ms boundaries. Verified in QEMU (BIOS and OVMF) with EDID
+monitors; real-panel behaviour is untested, and a monitor whose native size has no VBE mode gets the next smaller one.
+
+**USB.** `kernel/xhci.c` takes the controller from the firmware, enumerates the root ports at boot, drives HID
+boot-protocol keyboards (with software key repeat) and mice, and USB mass storage as `/dev/hdX`. A USB stick that
+holds the install ISO is recognised and can never be chosen as an install target. Verified with QEMU's xHCI,
+`usb-kbd`, `usb-mouse` and `usb-storage` (read/write and install from a USB-attached ISO), under BIOS and UEFI.
+
+**Disks and network.** virtio-blk (`kernel/virtio_blk.c`, tested in QEMU) and the Realtek RTL8168 family driver
+(`kernel/rtl8168.c`, untested). Writes to a raw disk must still be whole 512-byte sectors.
+
+## Daily-use features
+
+- **Clipboard** shared by every app: Ctrl+C/X/V in the editor and the browser's address bar, Ctrl+Shift+C/V in the
+  terminal (dragging selects and copies), middle click pastes.
+- **Text editor:** selection with Shift+arrows or the mouse, Ctrl+A, undo/redo (Ctrl+Z/Ctrl+Y), files up to 1 MiB,
+  and a warning before closing with unsaved changes.
+- **Files:** Ctrl+C / Ctrl+V copies files and whole folders (never overwriting: "name (2)"), a Pictures place,
+  and images open in the new **Image Viewer** (PNG, JPEG, GIF; Left/Right for the rest of the folder).
+- **Screenshots:** Print Screen saves a PNG in `/disk/Pictures`.
+- **Power:** Restart uses the ACPI reset register, then the PCI reset port and the keyboard controller, so it works on
+  machines without a PS/2 controller. Settings > Power turns the screen off (black) after 5-60 idle minutes.
+  Not supported: battery level, sleep, brightness keys, real DPMS monitor standby (all need an ACPI AML interpreter
+  or GPU driver).
+- **Storage:** files up to 4 GiB and data partitions up to 16 GiB (was 4 MiB and 128 MiB).

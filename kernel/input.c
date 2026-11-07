@@ -29,7 +29,13 @@ void input_push(u8 type, u8 flags, u16 code, i16 dx, i16 dy)
     /* Merge into the newest unread motion event so fast mice can't flood the queue. */
     if (type == INPUT_MOUSE && qhead != qtail) {
         struct input_event *last = &q[(qtail - 1) % QN];
-        if (last->type == INPUT_MOUSE && last->code == code) {
+        if (last->type == INPUT_MOUSE && last->code == code && (last->flags & IEF_ABS) == (flags & IEF_ABS)) {
+            if (flags & IEF_ABS) {
+                last->dx = dx;                  /* absolute: the newest position wins */
+                last->dy = dy;
+                wakeup(q);
+                return;
+            }
             last->dx += dx;
             last->dy += dy;
             wakeup(q);

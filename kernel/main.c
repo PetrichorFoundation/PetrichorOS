@@ -42,6 +42,12 @@ void kmain(u32 magic, u32 *mbi)
         bootinfo.fb_bpp = ((const u8 *)mbi)[108];
     }
 
+    if (mbi[35] == 0x44494445 && mbi[32] >= 640 && mbi[33] >= 480) {   /* "EDID": the monitor's preferred mode */
+        bootinfo.edid_w = mbi[32];
+        bootinfo.edid_h = mbi[33];
+        bootinfo.edid_mhz = mbi[34];
+    }
+
     if (mbi[0] & 0x80000000u)                       /* flag bit 31 (ours): mbi[30] = ACPI RSDP, from the UEFI loader */
         bootinfo.rsdp = mbi[30];
 
@@ -72,6 +78,13 @@ void kmain(u32 magic, u32 *mbi)
     random_init();
     if (bootinfo.fb_addr && bootinfo.fb_bpp == 32)
         console_use_fb();                       /* VGA text mode is gone: draw text on the framebuffer */
+    if (bootinfo.fb_addr) {
+        if (bootinfo.edid_w)
+            kprintf("[gfx ] %ux%u framebuffer; the monitor prefers %ux%u at %u.%02u Hz\n", bootinfo.fb_w, bootinfo.fb_h,
+                    bootinfo.edid_w, bootinfo.edid_h, bootinfo.edid_mhz / 1000, bootinfo.edid_mhz % 1000 / 10);
+        else
+            kprintf("[gfx ] %ux%u framebuffer; the monitor did not report its size\n", bootinfo.fb_w, bootinfo.fb_h);
+    }
     storage_init();
     fs_init();
     initrd_load(_initrd_start, _initrd_end - _initrd_start);

@@ -23,7 +23,9 @@ static u32 dock_bounce[16];
 
 static struct fbinfo fb;
 static u32 *back, *wall;
-static struct rect screen = {0, 0, SCREEN_W, SCREEN_H};
+int screen_w = 1024, screen_h = 768;
+static struct rect screen = {0, 0, 1024, 768};
+static int *xsrc;                        /* framebuffer column -> desktop column, when the desktop is scaled */
 
 static struct win wins[MAXWIN];
 static struct win *zorder[MAXWIN];
@@ -32,7 +34,7 @@ static struct win *focus;
 static int opened;                       /* total windows ever opened: drives cascading */
 
 static int running = 1, exit_code, want_poweroff, want_reboot;
-static int mx = SCREEN_W / 2, my = SCREEN_H / 2, mbtn;
+static int mx = 512, my = 384, mbtn;
 
 enum { DR_NONE, DR_MOVE, DR_RESIZE, DR_APP };
 static int drag_mode;
@@ -75,6 +77,11 @@ u32 theme_accent_color(int i) { return accents[i]; }
 #define THEME_CONF "/disk/etc/pdesk.conf"
 
 int g_animations = 1;
+int g_fps = 0;                           /* 0: match the monitor */
+static int g_res_w, g_res_h;             /* saved resolution, 0 = native */
+int g_blank_min = 10;
+static int blanked;
+static u32 last_input;
 
 static void theme_load(void)
 {
@@ -82,7 +89,7 @@ static void theme_load(void)
     g_accent_idx = 0;
     int fd = open(THEME_CONF, O_RDONLY);
     if (fd >= 0) {
-        char buf[64];
+        char buf[128];
         int n = read(fd, buf, sizeof buf - 1);
         close(fd);
         buf[n > 0 ? n : 0] = 0;
@@ -92,6 +99,16 @@ static void theme_load(void)
         if (p) g_accent_idx = atoi(p + 7);
         p = strstr(buf, "anim=");
         if (p) g_animations = atoi(p + 5);
+        p = strstr(buf, "res=");
+        if (p) {
+            g_res_w = atoi(p + 4);
+            while (*p && *p != 'x') p++;
+            g_res_h = *p == 'x' ? atoi(p + 1) : 0;
+        }
+        p = strstr(buf, "fps=");
+        if (p) g_fps = atoi(p + 4);
+        p = strstr(buf, "blank=");
+        if (p) g_blank_min = atoi(p + 6);
     }
     if (g_wall < 0 || g_wall >= NWALL) g_wall = 0;
     if (g_accent_idx < 0 || g_accent_idx >= NACCENT) g_accent_idx = 0;
@@ -163,8 +180,9 @@ static void theme_save(void)
     diskinfo(&di);
     if (di.mounted) {
         mkdir("/disk/etc");
-        char buf[64];
-        int n = snprintf(buf, sizeof buf, "wall=%d\naccent=%d\nanim=%d\n", g_wall, g_accent_idx, g_animations);
+        char buf[128];
+        int n = snprintf(buf, sizeof buf, "wall=%d\naccent=%d\nanim=%d\nres=%dx%d\nfps=%d\nblank=%d\n", g_wall,
+                         g_accent_idx, g_animations, g_res_w, g_res_h, g_fps, g_blank_min);
         int fd = open(THEME_CONF, O_WRONLY | O_CREAT | O_TRUNC);
         if (fd >= 0) {
             write(fd, buf, n);
@@ -196,30 +214,61 @@ static const char *const cursor_art[19] = {
     "     X..X   ", "      X..X  ", "      X..X  ", "       XX   ",
 };
 
+static int fb_scaled(void) { return screen_w != (int)fb.width || screen_h != (int)fb.height; }
+
+/* Where the pointer is on the real screen. */
+static void cursor_pos(int *cx, int *cy)
+{
+    *cx = fb_scaled() ? (int)((long)mx * fb.width / screen_w) : mx;
+    *cy = fb_scaled() ? (int)((long)my * fb.height / screen_h) : my;
+}
+
 static void cursor_show(void)
 {
     u32 *px = (u32 *)(uptr)fb.addr;
+    int pitch = fb.pitch / 4, cx, cy;
+    cursor_pos(&cx, &cy);
     for (int y = 0; y < 19; y++) {
         for (int x = 0; x < 12; x++) {
             char c = cursor_art[y][x];
-            int sx = mx + x, sy = my + y;
-            if (c == ' ' || sx >= SCREEN_W || sy >= SCREEN_H)
+            int sx = cx + x, sy = cy + y;
+            if (c == ' ' || sx >= (int)fb.width || sy >= (int)fb.height)
                 continue;
-            px[sy * SCREEN_W + sx] = c == 'X' ? 0x000000 : 0xFFFFFF;
+            px[sy * pitch + sx] = c == 'X' ? 0x000000 : 0xFFFFFF;
         }
     }
 }
 
+/* Copies a rectangle of the desktop to the screen (scaling it when the desktop is drawn smaller). */
 static void present(struct rect r)
 {
     u32 *px = (u32 *)(uptr)fb.addr;
-    for (int y = r.y; y < r.y + r.h; y++)
-        memcpy(px + y * SCREEN_W + r.x, back + y * SCREEN_W + r.x, r.w * 4);
+    int pitch = fb.pitch / 4;
+    if (!fb_scaled()) {
+        for (int y = r.y; y < r.y + r.h; y++)
+            memcpy(px + y * pitch + r.x, back + y * screen_w + r.x, r.w * 4);
+        return;
+    }
+    int fw = fb.width, fh = fb.height;
+    int x0 = (int)((long)r.x * fw / screen_w), x1 = (int)(((long)(r.x + r.w) * fw + screen_w - 1) / screen_w);
+    int y0 = (int)((long)r.y * fh / screen_h), y1 = (int)(((long)(r.y + r.h) * fh + screen_h - 1) / screen_h);
+    if (x1 > fw) x1 = fw;
+    if (y1 > fh) y1 = fh;
+    for (int y = y0; y < y1; y++) {
+        const u32 *row = back + (int)((long)y * screen_h / fh) * screen_w;
+        u32 *out = px + y * pitch;
+        for (int x = x0; x < x1; x++)
+            out[x] = row[xsrc[x]];
+    }
 }
 
 static void cursor_hide(void)
 {
-    struct rect r = rect_isect((struct rect){mx, my, 12, 19}, screen);
+    int cx, cy;
+    cursor_pos(&cx, &cy);
+    int x0 = (int)((long)cx * screen_w / fb.width), x1 = (int)(((long)(cx + 12) * screen_w + fb.width - 1) / fb.width);
+    int y0 = (int)((long)cy * screen_h / fb.height), y1 = (int)(((long)(cy + 19) * screen_h + fb.height - 1) / fb.height);
+    struct rect r = rect_isect((struct rect){x0, y0, x1 - x0, y1 - y0}, screen);
     if (r.w > 0)
         present(r);
 }
@@ -1165,7 +1214,7 @@ static void blit_scaled(const u32 *src, int sw, int sh, struct rect d, int alpha
     struct rect c = rect_isect(d, gfx_get_clip());
     if (c.w <= 0)
         return;
-    static int xmap[SCREEN_W];
+    static int xmap[MAX_SCREEN_W];
     for (int x = 0; x < c.w; x++)
         xmap[x] = (int)((long)(c.x + x - d.x) * sw / d.w);
     for (int y = c.y; y < c.y + c.h; y++) {
@@ -1190,6 +1239,9 @@ static void anim_draw(void)
 /* ---------------- repaint ---------------- */
 
 static void anim_draw(void);
+static int display_apply(int w, int h);
+static void screenshot(void);
+static int frame_wait(void);
 
 static void repaint(void)
 {
@@ -1461,6 +1513,19 @@ static void on_up(void)
 
 static void handle_mouse(struct input_event *e)
 {
+    if ((e->code & BTN_MIDDLE) && !(mbtn & BTN_MIDDLE)) {
+        struct win *w = window_at(mx, my);
+        if (w && w->app->mouse && rect_hit(wm_client(w), mx, my)) {
+            struct rect c = wm_client(w);
+            activate(w);
+            w->app->mouse(w, mx - c.x, my - c.y, M_MDOWN);
+        }
+    }
+    if (e->flags & IEF_ABS) {                                     /* tablet (VMs): an absolute position */
+        int nx = (int)((long)e->dx * SCREEN_W / 32768), ny = (int)((long)e->dy * SCREEN_H / 32768);
+        e->dx = nx - mx;
+        e->dy = ny - my;
+    }
     mx += e->dx;
     my += e->dy;
     if (mx < 0) mx = 0;
@@ -1516,6 +1581,10 @@ static void handle_key(struct input_event *e)
         return;
     }
     if ((e->flags & IEF_ALT) && e->code == '\t') { cycle_focus(); return; }
+    if (e->code == KEY_PRINT) {
+        screenshot();
+        return;
+    }
     if ((e->flags & IEF_ALT) && e->code == KEY_F1 + 3) {           /* Alt+F4 */
         if (focus)
             wm_try_close(focus);
@@ -1594,6 +1663,233 @@ static void gallery_draw(struct win *w, struct rect c)
     }
 }
 
+/* ---------------- display ---------------- */
+
+/* (Re)allocates the drawing buffers for a w x h desktop.  Does not touch the saved setting. */
+static int display_apply(int w, int h)
+{
+    if (w < 640 || h < 480 || w > MAX_SCREEN_W || h > MAX_SCREEN_H)
+        return -1;
+    u32 *nb = malloc(w * h * 4), *nw = malloc(w * h * 4);
+    int *nx = malloc(fb.width * sizeof(int));
+    if (!nb || !nw || !nx) {
+        free(nb); free(nw); free(nx);
+        return -1;
+    }
+    int ow = screen_w, oh = screen_h;
+    free(back); free(wall); free(xsrc);
+    back = nb; wall = nw; xsrc = nx;
+    screen_w = w; screen_h = h;
+    screen = (struct rect){0, 0, w, h};
+    for (u32 x = 0; x < fb.width; x++)
+        xsrc[x] = (int)((long)x * w / fb.width);
+    mx = (int)((long)mx * w / ow); my = (int)((long)my * h / oh);
+    if (mx >= w) mx = w - 1;
+    if (my >= h) my = h - 1;
+    gfx_set_target(back, w, h);
+    gfx_set_clip(0, 0, w, h);
+    for (int i = 0; i < MAXWIN; i++) {
+        struct win *wn = &wins[i];
+        if (!wn->used)
+            continue;
+        if (wn->maximized)
+            set_geometry(wn, 0, PANEL_H, w, WORK_H);
+        else {
+            if (wn->w > w) wn->w = w;
+            if (wn->h > h - PANEL_H) wn->h = h - PANEL_H;
+            if (wn->x + wn->w > w) wn->x = w - wn->w;
+            if (wn->y + 40 > h) wn->y = h - 40 > PANEL_H ? h - 40 : PANEL_H;
+            if (wn->x < 0) wn->x = 0;
+        }
+    }
+    return 0;
+}
+
+void display_get(struct display_info *d)
+{
+    d->screen_w = fb.width; d->screen_h = fb.height;
+    d->mon_w = fb.mon_w; d->mon_h = fb.mon_h; d->mon_mhz = fb.mon_mhz;
+    d->render_w = screen_w; d->render_h = screen_h;
+    d->fixed = fb.fixed;
+    d->fps = g_fps;
+}
+
+int display_set(int w, int h)
+{
+    if (w <= 0) {                                    /* native */
+        w = fb.width; h = fb.height;
+    }
+    if (w > (int)fb.width || h > (int)fb.height)
+        return -1;
+    if (w != screen_w || h != screen_h) {
+        if (display_apply(w, h) < 0)
+            return -1;
+        render_wallpaper();
+        invalidate(0, 0, w, h);
+    }
+    g_res_w = w == (int)fb.width && h == (int)fb.height ? 0 : w;
+    g_res_h = g_res_w ? h : 0;
+    theme_save();
+    return 0;
+}
+
+void blank_set(int minutes)
+{
+    g_blank_min = minutes;
+    theme_save();
+}
+
+/* ---------------- clipboard ---------------- */
+
+static char *clip;
+static int clip_len;
+
+void clip_set(const char *text, int len)
+{
+    char *n = malloc(len + 1);
+    if (!n)
+        return;
+    memcpy(n, text, len);
+    n[len] = 0;
+    free(clip);
+    clip = n;
+    clip_len = len;
+}
+
+const char *clip_get(int *len)
+{
+    if (len)
+        *len = clip_len;
+    return clip_len ? clip : NULL;
+}
+
+/* ---------------- screenshots ---------------- */
+
+static u32 crc_tab[256];
+
+static u32 crc32_upd(u32 c, const u8 *p, u32 n)
+{
+    if (!crc_tab[1])
+        for (u32 i = 0; i < 256; i++) {
+            u32 v = i;
+            for (int k = 0; k < 8; k++)
+                v = v & 1 ? 0xEDB88320u ^ (v >> 1) : v >> 1;
+            crc_tab[i] = v;
+        }
+    for (u32 i = 0; i < n; i++)
+        c = crc_tab[(c ^ p[i]) & 0xFF] ^ (c >> 8);
+    return c;
+}
+
+static void put_be32(u8 *p, u32 v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
+
+/* Writes the desktop as a PNG (uncompressed deflate blocks: big but simple and exact). */
+static int write_png(const char *path, const u32 *px, int w, int h)
+{
+    u32 row = 1 + w * 3, raw = row * h;
+    u32 nblk = (raw + 65534) / 65535;
+    u32 zlen = 2 + raw + nblk * 5 + 4;
+    u32 total = 8 + 25 + 12 + zlen + 12;
+    u8 *out = malloc(total);
+    if (!out)
+        return -1;
+    static const u8 sig[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
+    memcpy(out, sig, 8);
+    u8 *p = out + 8;
+    put_be32(p, 13); memcpy(p + 4, "IHDR", 4); put_be32(p + 8, w); put_be32(p + 12, h);
+    p[16] = 8; p[17] = 2; p[18] = p[19] = p[20] = 0;
+    put_be32(p + 21, ~crc32_upd(~0u, p + 4, 17));
+    p += 25;
+    put_be32(p, zlen); memcpy(p + 4, "IDAT", 4);
+    u8 *z = p + 8, *q = z;
+    *q++ = 0x78; *q++ = 0x01;
+    u32 a = 1, b = 0, left = raw, pos = 0;
+    u8 *rowbuf = malloc(row);
+    if (!rowbuf) {
+        free(out);
+        return -1;
+    }
+    int cur_row = -1;
+    while (left) {
+        u32 n = left > 65535 ? 65535 : left;
+        *q++ = left == n;                       /* BFINAL, stored */
+        *q++ = n; *q++ = n >> 8; *q++ = ~n; *q++ = (~n) >> 8;
+        for (u32 i = 0; i < n; i++, pos++) {
+            int y = pos / row, x = pos % row;
+            if (y != cur_row) {
+                cur_row = y;
+                rowbuf[0] = 0;
+                for (int k = 0; k < w; k++) {
+                    u32 c = px[y * w + k];
+                    rowbuf[1 + k * 3] = c >> 16; rowbuf[2 + k * 3] = c >> 8; rowbuf[3 + k * 3] = c;
+                }
+            }
+            u8 v = rowbuf[x];
+            *q++ = v;
+            a = (a + v) % 65521;
+            b = (b + a) % 65521;
+        }
+        left -= n;
+    }
+    free(rowbuf);
+    put_be32(q, (b << 16) | a);
+    q += 4;
+    put_be32(q, ~crc32_upd(~0u, p + 4, 4 + zlen));
+    p = q + 4;
+    put_be32(p, 0); memcpy(p + 4, "IEND", 4); put_be32(p + 8, ~crc32_upd(~0u, p + 4, 4));
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC), ok = -1;
+    if (fd >= 0) {
+        ok = write(fd, out, total) == (int)total ? 0 : -1;
+        close(fd);
+    }
+    free(out);
+    return ok;
+}
+
+static void screenshot(void)
+{
+    struct diskinfo di;
+    diskinfo(&di);
+    const char *dir = di.mounted ? "/disk/Pictures" : "/tmp";
+    mkdir(dir);
+    struct rtc_time t;
+    gettime(&t);
+    char path[96];
+    snprintf(path, sizeof path, "%s/shot-%04d%02d%02d-%02d%02d%02d.png", dir, t.year, t.month, t.day, t.hour, t.min,
+             t.sec);                                           /* file names are limited to 27 characters */
+    if (write_png(path, back, screen_w, screen_h) == 0) {
+        char msg[120];
+        snprintf(msg, sizeof msg, "Screenshot saved in %s", dir);
+        wm_notify(msg);
+    } else {
+        wm_notify("Could not save the screenshot");
+    }
+}
+
+void fps_set(int fps)
+{
+    g_fps = fps;
+    theme_save();
+}
+
+/* Milliseconds to wait between animation frames: the cap, or the monitor's refresh rate.  The kernel's clock
+ * ticks every 10 ms, so the pace is exact on average but individual frames land on 10 ms boundaries. */
+static int frame_wait(void)
+{
+    int fps = g_fps;
+    if (fps <= 0)
+        fps = fb.mon_mhz ? (fb.mon_mhz + 500) / 1000 : 60;
+    if (fps > 100) fps = 100;
+    if (fps < 10) fps = 10;
+    static u32 next;                                  /* when the next frame is due, in ms */
+    u32 now = uptime() * 10;
+    if ((int)(next - now) < -200 || next == 0)
+        next = now;
+    next += 1000 / fps;
+    int wait = (int)(next - now);
+    return wait < 1 ? 1 : wait;
+}
+
 static const struct app gallery_app = {.draw = gallery_draw};
 
 static int anim_active(void);
@@ -1601,7 +1897,7 @@ static void anim_step(u32 now);
 
 int main(int argc, char **argv)
 {
-    int e = fbmap(&fb, SCREEN_W, SCREEN_H);
+    int e = fbmap(&fb, 0, 0);
     if (e < 0) {
         fprintf(2, "pdesk: cannot start graphics (%s). Run under QEMU with the default VGA.\n",
                 strerror(e));
@@ -1613,15 +1909,19 @@ int main(int argc, char **argv)
         fprintf(2, "pdesk: cannot open /dev/input\n");
         return 1;
     }
-    back = malloc(SCREEN_W * SCREEN_H * 4);
-    wall = malloc(SCREEN_W * SCREEN_H * 4);
-    if (!back || !wall) {
+    theme_load();
+    {
+        struct diskinfo dk;
+        diskinfo(&dk);
+        if (dk.mounted)
+            mkdir("/disk/Pictures");                      /* screenshots land here */
+    }
+    if (display_apply(g_res_w > 0 && g_res_w <= (int)fb.width && g_res_h > 0 && g_res_h <= (int)fb.height ? g_res_w : fb.width,
+                      g_res_w > 0 && g_res_w <= (int)fb.width && g_res_h > 0 && g_res_h <= (int)fb.height ? g_res_h : fb.height) < 0) {
         fbmap(NULL, 0, 0);
         fprintf(2, "pdesk: out of memory\n");
         return 1;
     }
-    gfx_set_target(back, SCREEN_W, SCREEN_H);
-    theme_load();
     struct driveinfo di[MAXDRIVES];
     int nd = drives(di, MAXDRIVES);
     for (int i = 0; i < nd; i++)
@@ -1643,6 +1943,7 @@ int main(int argc, char **argv)
     repaint();
 
     u32 last_sec = uptime();
+    last_input = last_sec;
     char last_clock[40] = "";
     while (running) {
         struct pollfd pf[64];
@@ -1659,13 +1960,31 @@ int main(int argc, char **argv)
             } else if (w->app->pollfd && n < 64 && w->app->pollfd(w, &pf[n]))
                 owner[n++] = w;
         }
-        int r = poll(pf, n, anim_active() ? 20 : 100);
+        int wait = anim_active() ? frame_wait() : 100;
+        for (int i = 0; i < nz; i++) {                     /* apps with timers (web pages running scripts) */
+            struct win *w = zorder[i];
+            if (w->app->frame) {
+                int ms = w->app->frame(w, uptime() * 10);
+                if (ms >= 0 && ms < wait)
+                    wait = ms < 1 ? 1 : ms;
+            }
+        }
+        int r = poll(pf, n, wait);
 
-        cursor_hide();
+        if (!blanked)
+            cursor_hide();
         if (r > 0) {
             if (pf[0].revents & POLLIN) {
                 struct input_event ev[32];
                 int got = read(in, ev, sizeof ev) / (int)sizeof ev[0];
+                if (got > 0) {
+                    last_input = uptime();
+                    if (blanked) {                             /* any input wakes the screen; it isn't passed on */
+                        blanked = 0;
+                        invalidate(0, 0, SCREEN_W, SCREEN_H);
+                        got = 0;
+                    }
+                }
                 for (int i = 0; i < got; i++) {
                     if (ev[i].type == INPUT_MOUSE)
                         handle_mouse(&ev[i]);
@@ -1700,10 +2019,19 @@ int main(int argc, char **argv)
             invalidate(SCREEN_W - 200, 0, 200, PANEL_H);
         }
 
-        if (dirty)
-            repaint();
-        else
-            cursor_show();
+        if (!blanked && g_blank_min > 0 && now - last_input > (u32)g_blank_min * 60 * 100) {
+            blanked = 1;                                       /* screen off: black, nothing drawn until input */
+            u32 *px = (u32 *)(uptr)fb.addr;
+            for (u32 y = 0; y < fb.height; y++)
+                memset(px + y * (fb.pitch / 4), 0, fb.width * 4);
+        }
+        if (blanked) {
+            dirty = 0;
+        } else {
+            if (dirty)
+                repaint();
+            cursor_show();                                     /* always: a repaint may have covered the pointer */
+        }
     }
 
     for (int i = 0; i < MAXWIN; i++)

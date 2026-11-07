@@ -103,6 +103,8 @@ int text_width(const char *s, int n, int px, int flags)
 
 /* ============================== display list ============================== */
 
+static struct node *emit_node;                  /* the element whose box is being drawn: recorded in each command */
+
 static int cmd_new(int kind)
 {
     if (P->ncmds == P->cap_cmds) {
@@ -116,6 +118,7 @@ static int cmd_new(int kind)
     struct cmd *c = &P->cmds[P->ncmds];
     memset(c, 0, sizeof *c);
     c->kind = kind;
+    c->node = emit_node;
     return P->ncmds++;
 }
 
@@ -734,7 +737,16 @@ static void replaced_size(struct node *n, int *w, int *h)
     *h = hh;
 }
 
+static void emit_replaced_(struct node *n, int x, int y, int w, int h);
 static void emit_replaced(struct node *n, int x, int y, int w, int h)
+{
+    struct node *saved = emit_node;
+    emit_node = n;
+    emit_replaced_(n, x, y, w, h);
+    emit_node = saved;
+}
+
+static void emit_replaced_(struct node *n, int x, int y, int w, int h)
 {
     const struct style *s = n->st;
     int bgimg;
@@ -789,8 +801,18 @@ static void emit_replaced(struct node *n, int x, int y, int w, int h)
                 if (stars) { memset(stars, '*', len); stars[len] = 0; shown = stars; }
             }
             int maxc = (w - b.bl - b.br - b.pl - b.pr) * 16 / (px * 8 > 0 ? px * 8 : 1);
-            if (len > maxc && maxc > 0) len = maxc;
-            text_cmd(tx, ty, shown, len, px, col, 0, text_width(shown, len, px, 0));
+            int start = 0;
+            if (n == css_focus && val && *val && len > maxc && maxc > 0) start = len - maxc;   /* keep the end in view */
+            else if (len > maxc && maxc > 0) len = maxc;
+            text_cmd(tx, ty, shown + start, len - start, px, col, 0, text_width(shown + start, len - start, px, 0));
+        }
+        if (n == css_focus) {                                       /* caret */
+            int vl = val ? (int)strlen(val) : 0;
+            int maxc = (w - b.bl - b.br - b.pl - b.pr) * 16 / (px * 8 > 0 ? px * 8 : 1);
+            int from = maxc > 0 && vl > maxc ? vl - maxc : 0;
+            int cx = tx + (vl ? text_width(pw ? "********************************" : val + from, vl - from > 32 && pw ? 32 : vl - from, px, 0) : 0);
+            int k = cmd_new(K_RECT);
+            if (k >= 0) { struct cmd *c = &P->cmds[k]; c->color = 0xFF202124; c->x = cx; c->y = ty - 1; c->w = 1; c->h = px + 2; }
         }
     } else if (n->tag == TG_SELECT) {
         const char *txt = "";
@@ -814,6 +836,17 @@ static void emit_replaced(struct node *n, int x, int y, int w, int h)
                 ln++;
                 p = e + 1;
             }
+        }
+        if (n == css_focus) {                                       /* caret after the last line */
+            int lines = 0, lastw = 0;
+            if (n->first && n->first->type == 1) {
+                const char *t = n->first->text, *ls = t;
+                for (int i = 0; i < n->first->tlen; i++) if (t[i] == '\n') { lines++; ls = t + i + 1; }
+                lastw = text_width(ls, n->first->text + n->first->tlen - ls, px, 0);
+            }
+            if (lines > 3) lines = 3;
+            int k = cmd_new(K_RECT);
+            if (k >= 0) { struct cmd *c = &P->cmds[k]; c->color = 0xFF202124; c->x = tx + lastw; c->y = ty + lines * lh - 1; c->w = 1; c->h = px + 2; }
         }
     } else if (n->tag == TG_CANVAS || n->tag == TG_VIDEO) {
         int k = cmd_new(K_RECT);
@@ -905,7 +938,16 @@ struct oline {
     int first[24];
 };
 
+static void frag_(struct node *n, int x0, int x1, int base, int first, int last);
 static void frag(struct node *n, int x0, int x1, int base, int first, int last)
+{
+    struct node *saved = emit_node;
+    emit_node = n;
+    frag_(n, x0, x1, base, first, last);
+    emit_node = saved;
+}
+
+static void frag_(struct node *n, int x0, int x1, int base, int first, int last)
 {
     const struct style *s = n->st;
     int has_bord = s->border_w[0] || s->border_w[1] || s->border_w[2] || s->border_w[3];
@@ -1028,7 +1070,10 @@ static int flush_line(struct run *r, struct oline *ol, int i, int j, int y, int 
             int fl = (st->bold ? CF_BOLD : 0) | (st->italic ? CF_ITALIC : 0) | (st->mono ? CF_MONO : 0) |
                      (a->decor & DEC_UNDERLINE ? CF_UNDER : 0) | (a->decor & DEC_STRIKE ? CF_STRIKE : 0);
             if (!st->visibility && (st->color >> 24)) {
+                struct node *saved_en = emit_node;
+                emit_node = sn;
                 int ci = cmd_new(K_TEXT);
+                emit_node = saved_en;
                 if (ci >= 0) {
                     struct cmd *c = &P->cmds[ci];
                     c->x = xs[k - i]; c->y = base - st->font_size * 4 / 5 + a->dy; c->w = xs[lastw + 1 - i] - xs[k - i];
@@ -1668,7 +1713,17 @@ static int layout_table(struct node *t, int cx, int cy, int tw)
 
 /* ============================== block layout ============================== */
 
+static int layout_block_(struct node *n, int x, int y, int cw, int force_w, struct bfc *pf, struct lres *res);
 static int layout_block(struct node *n, int x, int y, int cw, int force_w, struct bfc *pf, struct lres *res)
+{
+    struct node *saved = emit_node;
+    emit_node = n;
+    int r = layout_block_(n, x, y, cw, force_w, pf, res);
+    emit_node = saved;
+    return r;
+}
+
+static int layout_block_(struct node *n, int x, int y, int cw, int force_w, struct bfc *pf, struct lres *res)
 {
     const struct style *s = n->st;
     struct box b;

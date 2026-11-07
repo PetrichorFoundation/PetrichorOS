@@ -41,7 +41,7 @@ UEXE += $(addprefix $B/user/out/,$(UAPPS))
 
 .DEFAULT_GOAL := all
 .PHONY: all iso run run-uefi run-uefi-iso run-multiboot run-nographic run-iso run-installer run-installed clean-target clean
-all: $B/petrichor.elf $B/disk.img $B/petrichor.iso $B/uefi.img $B/repo/index
+all: $B/petrichor.elf $B/disk.img $B/petrichor.iso $B/uefi.img
 
 $B/petrichor.elf: $(KOBJ) kernel/kernel.ld
 	$(LD) $(LDFLAGS) -T kernel/kernel.ld -o $@ $(KOBJ)
@@ -56,45 +56,38 @@ $B/%.o: %.S
 	@mkdir -p $(dir $@)
 	$(CC) $(ASFLAGS) -c $< -o $@
 
+# The JavaScript engine computes with doubles: SSE on for its files only (nothing else in the desktop passes
+# floating-point values across a call, and the kernel saves SSE state per process).
+$B/user/apps/pdesk/js.o $B/user/apps/pdesk/jsdom.o: UCFLAGS += -msse2
+
 $B/user/out/%: $B/user/bin/%.o $(ULIB) user/user.ld
 	@mkdir -p $(dir $@)
 	$(LD) $(LDFLAGS) -T user/user.ld -o $@ $(filter %.o,$^)
 $(addprefix $B/user/out/,$(TLSBINS)): $(TLSLIB)
 $B/user/out/pinstall: $B/lib/efiimg.o
 
-# ---- packages and the package repository ----
-# packages/<name>/package (VERSION, DEPS, DESC), src/*.c -> bin/<prog>, files/ copied as-is.
-PKGS    := $(notdir $(wildcard packages/*))
-PKG_SRC := $(wildcard packages/*/src/*.c)
-define PKGBIN_RULE
-$B/pkgstage/$(1)/bin/$(2): packages/$(1)/src/$(2).c $(ULIB) user/user.ld
-	@mkdir -p $$(dir $$@) $B/pkgobj
-	$$(CC) $$(UCFLAGS) -c $$< -o $B/pkgobj/$(1)-$(2).o
-	$$(LD) $$(LDFLAGS) -T user/user.ld -o $$@ $B/pkgobj/$(1)-$(2).o $$(ULIB)
-endef
-$(foreach s,$(PKG_SRC),$(eval $(call PKGBIN_RULE,$(word 2,$(subst /, ,$(s))),$(basename $(notdir $(s))))))
-PKG_BIN := $(foreach s,$(PKG_SRC),$B/pkgstage/$(word 2,$(subst /, ,$(s)))/bin/$(basename $(notdir $(s))))
-PKG_FILES := $(shell find packages -type f 2>/dev/null)
-
+# ---- packages ----
+# Packages live in their own repository (github.com/krspybacon/Petrichor-Packages), whose Makefile calls this
+# rule once per package directory:
+#   make package PKGDIR=/abs/path/packages/<name> OUT=/abs/path/to/the/repo
+# <name>/package holds VERSION, DEPS, DESC; src/*.c -> bin/<prog>; files/ is copied as-is.
 $B/mkppk: tools/mkppk.c lib/sha256.c lib/sha256.h
 	@mkdir -p $B
 	$(HOSTCC) -O2 -Ilib -o $@ tools/mkppk.c lib/sha256.c
 
-.PHONY: repo serve-repo
-repo: $B/repo/index
-
-$B/repo/index: $B/mkppk $(PKG_BIN) $(PKG_FILES)
-	rm -rf $B/repo
-	mkdir -p $B/repo
-	@for p in $(PKGS); do \
-	  mkdir -p $B/pkgstage/$$p; \
-	  if [ -d packages/$$p/files ]; then cp -R packages/$$p/files/. $B/pkgstage/$$p/; fi; \
-	  ( . packages/$$p/package; $B/mkppk $B/repo $B/pkgstage/$$p $$p "$$VERSION" "$$DEPS" "$$DESC" ) || exit 1; \
-	done
-
-# Host side of `ppm update` (QEMU reaches the host at 10.0.2.2).
-serve-repo: repo
-	cd $B/repo && python3 -m http.server 8080 --bind 127.0.0.1
+.PHONY: package
+package: $B/mkppk $(ULIB) user/user.ld
+	@test -n "$(PKGDIR)" -a -n "$(OUT)" || { echo "usage: make package PKGDIR=<dir> OUT=<repo dir>"; exit 1; }
+	@test -f "$(PKGDIR)/package" || { echo "$(PKGDIR)/package is missing"; exit 1; }
+	@set -e; p=$$(basename "$(PKGDIR)"); st=$B/pkgstage/$$p; mkdir -p "$$st" $B/pkgobj; \
+	for s in "$(PKGDIR)"/src/*.c; do \
+	  [ -f "$$s" ] || continue; n=$$(basename "$$s" .c); mkdir -p "$$st/bin"; \
+	  echo "  CC  $$p/$$n"; \
+	  $(CC) $(UCFLAGS) -c "$$s" -o $B/pkgobj/$$p-$$n.o; \
+	  $(LD) $(LDFLAGS) -T user/user.ld -o "$$st/bin/$$n" $B/pkgobj/$$p-$$n.o $(ULIB); \
+	done; \
+	if [ -d "$(PKGDIR)/files" ]; then cp -R "$(PKGDIR)/files/." "$$st/"; fi; \
+	( . "$(PKGDIR)/package"; $B/mkppk "$(OUT)" "$$st" "$$p" "$$VERSION" "$$DEPS" "$$DESC" )
 
 # ---- bootloader and disk image ----
 $B/boot/%.bin: boot/%.S boot/%.ld
@@ -159,7 +152,8 @@ $B/initrd.img: $B/mkinitrd $(UEXE) $(ROOTFILES) $B/boot/stage1.bin $B/boot/stage
 	$B/mkinitrd $@ $B/root
 
 # ---- running ----
-QEMUFLAGS := -m 128 -no-reboot -drive file=$B/disk.img,format=raw,if=ide,index=0 -nic user,model=rtl8139
+QEMUFLAGS := -m 128 -no-reboot -drive file=$B/disk.img,format=raw,if=ide,index=0 -nic user,model=rtl8139 \
+             -device qemu-xhci -device usb-tablet          # tablet: the pointer follows the host mouse, no grab
 
 # A blank disk to install onto (kept between runs; `make clean-target` recreates it).
 $B/target.img:

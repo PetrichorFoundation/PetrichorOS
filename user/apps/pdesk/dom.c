@@ -41,6 +41,7 @@ const char *arena_str(struct page *p, const char *s, int n)
 
 void page_clear(struct page *p)
 {
+    js_page_end(p);
     css_free_rules(p);
     for (int i = 0; i < p->nres; i++) {
         if (p->res[i].img)
@@ -609,6 +610,13 @@ void html_parse(struct page *p, const char *html, int len)
                 }
             } else if (tag == TG_TEXTAREA) {
                 add_text(&b, html + i, e - i);
+            } else if (tag == TG_SCRIPT && e > i) {                /* kept raw for the JavaScript engine */
+                struct node *t = new_node(&b, 1, TG_NONE);
+                if (t) {
+                    t->text = arena_str(p, html + i, e - i);
+                    t->tlen = e - i;
+                    append(b.cur, t);
+                }
             }
             i = e;
             while (i < len && html[i] != '>')
@@ -637,4 +645,293 @@ void text_parse(struct page *p, const char *text, int len)
     o += snprintf(html + o, 16, "</pre>");
     html_parse(p, html, o);
     free(html);
+}
+
+/* ============================== changes made by scripts ============================== */
+
+static void set_mask(struct node *n)
+{
+    n->mask[0] = n->mask[1] = 0;
+    if (n->type != 0)
+        return;
+    if (n->tag < TG_OTHER)
+        mask_set(n->mask, tag_names[n->tag], strlen(tag_names[n->tag]));
+    const char *id = attr_val(n, "id");
+    if (id)
+        mask_set(n->mask, id, strlen(id));
+    const char *cl = attr_val(n, "class");
+    for (const char *c = cl; c && *c;) {
+        while (*c == ' ' || *c == '\t' || *c == '\n')
+            c++;
+        const char *e = c;
+        while (*e && *e != ' ' && *e != '\t' && *e != '\n')
+            e++;
+        if (e > c)
+            mask_set(n->mask, c, e - c);
+        c = e;
+    }
+}
+
+const char *dom_tag_name(const struct node *n)
+{
+    if (n->type != 0) return "#text";
+    if (n->tag == TG_OTHER) return n->text ? n->text : "unknown";
+    return tag_names[n->tag];
+}
+
+/* Links are inherited: a text node inside <a href> carries the link's index. */
+static void fix_links(struct page *p, struct node *n, int link)
+{
+    if (n->type == 0 && n->tag == TG_A) {
+        const char *href = attr_val(n, "href");
+        if (href && strncmp(href, "javascript:", 11) && href[0] != '#') {
+            if (!n->link || n->link > p->nlinks || strcmp(p->links[n->link - 1], href))
+                n->link = add_link(p, href);
+        } else {
+            n->link = 0;
+        }
+        link = n->link;
+    } else {
+        n->link = link;
+    }
+    for (struct node *c = n->first; c; c = c->next)
+        fix_links(p, c, link);
+}
+
+static void load_img(struct page *p, struct node *n)
+{
+    const char *src = attr_val(n, "src");
+    n->img = 0;
+    if (!src || !*src || !strncmp(src, "data:", 5) || p->nres >= 200)
+        return;
+    char full[512];
+    url_resolve(p->url, src, full, sizeof full);
+    for (int i = 0; i < p->nres; i++)
+        if (!strcmp(p->res[i].url, full)) { n->img = i + 1; return; }
+    int ri = add_resource(p, full, R_IMAGE);
+    if (ri >= 0)
+        n->img = ri + 1;
+}
+
+struct node *dom_new_element(struct page *p, const char *tag)
+{
+    char name[32];
+    int l = 0;
+    for (; tag[l] && l < 31; l++)
+        name[l] = lc(tag[l]);
+    name[l] = 0;
+    struct builder b = {.p = p};
+    struct node *n = new_node(&b, 0, find_tag(name, l));
+    if (!n)
+        return NULL;
+    if (n->tag == TG_OTHER)
+        n->text = arena_str(p, name, l);
+    set_mask(n);
+    return n;
+}
+
+struct node *dom_new_text(struct page *p, const char *s, int len)
+{
+    struct builder b = {.p = p};
+    struct node *t = new_node(&b, 1, TG_NONE);
+    if (!t)
+        return NULL;
+    t->text = arena_str(p, s, len);
+    t->tlen = len;
+    return t;
+}
+
+void dom_remove(struct node *n)
+{
+    struct node *par = n->parent;
+    if (!par)
+        return;
+    if (n->prev) n->prev->next = n->next; else par->first = n->next;
+    if (n->next) n->next->prev = n->prev; else par->last = n->prev;
+    n->parent = n->prev = n->next = NULL;
+}
+
+void dom_insert(struct page *p, struct node *parent, struct node *n, struct node *before)
+{
+    for (struct node *a = parent; a; a = a->parent)
+        if (a == n) return;                                          /* can't put a node inside itself */
+    dom_remove(n);
+    if (before && before->parent != parent)
+        before = NULL;
+    n->parent = parent;
+    if (before) {
+        n->next = before;
+        n->prev = before->prev;
+        if (before->prev) before->prev->next = n; else parent->first = n;
+        before->prev = n;
+    } else {
+        append(parent, n);
+    }
+    fix_links(p, n, parent->link);
+}
+
+void dom_set_attr(struct page *p, struct node *n, const char *name, const char *val)
+{
+    if (n->type != 0)
+        return;
+    char lname[48];
+    int l = 0;
+    for (; name[l] && l < 47; l++)
+        lname[l] = lc(name[l]);
+    lname[l] = 0;
+    int idx = -1;
+    for (int i = 0; i < n->nattr; i++)
+        if (!strcmp(n->attr[i].name, lname)) idx = i;
+    if (!val) {
+        if (idx < 0) return;
+        memmove(&n->attr[idx], &n->attr[idx + 1], (n->nattr - idx - 1) * sizeof *n->attr);
+        n->nattr--;
+    } else if (idx >= 0) {
+        n->attr[idx].val = arena_str(p, val, strlen(val));
+    } else {
+        struct attr *na = arena_alloc(p, (n->nattr + 1) * sizeof *na);
+        if (!na) return;
+        if (n->nattr) memcpy(na, n->attr, n->nattr * sizeof *na);
+        na[n->nattr].name = arena_str(p, lname, l);
+        na[n->nattr].val = arena_str(p, val, strlen(val));
+        n->attr = na;
+        n->nattr++;
+    }
+    if (!strcmp(lname, "id") || !strcmp(lname, "class"))
+        set_mask(n);
+    else if (!strcmp(lname, "href") && n->tag == TG_A)
+        fix_links(p, n, n->parent ? n->parent->link : 0);
+    else if (!strcmp(lname, "src") && n->tag == TG_IMG)
+        load_img(p, n);
+}
+
+void dom_set_text(struct page *p, struct node *t, const char *s, int len)
+{
+    t->text = arena_str(p, s, len);
+    t->tlen = len;
+}
+
+/* Copies a node (and, if deep, its children) from another page's tree into this page. */
+static struct node *copy_node(struct page *p, const struct node *src, int deep)
+{
+    struct builder b = {.p = p};
+    struct node *n = new_node(&b, src->type, src->tag);
+    if (!n)
+        return NULL;
+    if (src->text)
+        n->text = arena_str(p, src->text, src->type == 1 ? src->tlen : (int)strlen(src->text));
+    n->tlen = src->tlen;
+    if (src->nattr) {
+        n->attr = arena_alloc(p, src->nattr * sizeof *n->attr);
+        if (n->attr) {
+            for (int i = 0; i < src->nattr; i++) {
+                n->attr[i].name = arena_str(p, src->attr[i].name, strlen(src->attr[i].name));
+                n->attr[i].val = arena_str(p, src->attr[i].val, strlen(src->attr[i].val));
+            }
+            n->nattr = src->nattr;
+        }
+    }
+    set_mask(n);
+    if (n->type == 0 && n->tag == TG_IMG)
+        load_img(p, n);
+    if (deep)
+        for (const struct node *c = src->first; c; c = c->next) {
+            struct node *cc = copy_node(p, c, 1);
+            if (cc) append(n, cc);
+        }
+    return n;
+}
+
+struct node *dom_clone(struct page *p, struct node *n, int deep) { return copy_node(p, n, deep); }
+
+void dom_set_html(struct page *p, struct node *parent, const char *html, int len)
+{
+    while (parent->first)
+        dom_remove(parent->first);
+    struct page *tp = calloc(1, sizeof *tp);
+    if (!tp)
+        return;
+    safestrcpy(tp->url, p->url, sizeof tp->url);
+    html_parse(tp, html, len);
+    struct node *from = tp->body ? tp->body : tp->root;
+    for (struct node *c = from ? from->first : NULL; c; c = c->next) {
+        struct node *n = copy_node(p, c, 1);
+        if (n)
+            append(parent, n);
+    }
+    page_clear(tp);
+    free(tp);
+    fix_links(p, parent, parent->parent ? parent->parent->link : 0);
+}
+
+static int text_into(const struct node *n, char *out, int cap, int o)
+{
+    if (n->type == 1) {
+        int c = o < cap ? (n->tlen < cap - o ? n->tlen : cap - o) : 0;
+        if (c > 0) memcpy(out + o, n->text, c);
+        return o + n->tlen;
+    }
+    if (n->tag == TG_SCRIPT || n->tag == TG_STYLE)
+        return o;
+    for (const struct node *c = n->first; c; c = c->next)
+        o = text_into(c, out, cap, o);
+    return o;
+}
+
+int dom_text(const struct node *n, char *out, int cap)
+{
+    int len = text_into(n, out, cap - 1, 0);
+    out[len < cap - 1 ? len : cap - 1] = 0;
+    return len;
+}
+
+static int ser_put(char *out, int cap, int o, const char *s, int n)
+{
+    if (o + n < cap) memcpy(out + o, s, n);
+    return o + n;
+}
+
+static int ser_esc(char *out, int cap, int o, const char *s, int n, int attr)
+{
+    for (int i = 0; i < n; i++) {
+        const char *r = s[i] == '<' ? "&lt;" : s[i] == '>' ? "&gt;" : s[i] == '&' ? "&amp;" : attr && s[i] == '"' ? "&quot;" : NULL;
+        o = r ? ser_put(out, cap, o, r, strlen(r)) : ser_put(out, cap, o, s + i, 1);
+    }
+    return o;
+}
+
+static int ser(const struct node *n, char *out, int cap, int o)
+{
+    if (n->type == 1)
+        return ser_esc(out, cap, o, n->text, n->tlen, 0);
+    const char *t = dom_tag_name(n);
+    o = ser_put(out, cap, o, "<", 1);
+    o = ser_put(out, cap, o, t, strlen(t));
+    for (int i = 0; i < n->nattr; i++) {
+        o = ser_put(out, cap, o, " ", 1);
+        o = ser_put(out, cap, o, n->attr[i].name, strlen(n->attr[i].name));
+        o = ser_put(out, cap, o, "=\"", 2);
+        o = ser_esc(out, cap, o, n->attr[i].val, strlen(n->attr[i].val), 1);
+        o = ser_put(out, cap, o, "\"", 1);
+    }
+    o = ser_put(out, cap, o, ">", 1);
+    if (is_void(n->tag))
+        return o;
+    for (const struct node *c = n->first; c; c = c->next)
+        o = ser(c, out, cap, o);
+    o = ser_put(out, cap, o, "</", 2);
+    o = ser_put(out, cap, o, t, strlen(t));
+    return ser_put(out, cap, o, ">", 1);
+}
+
+int dom_serialize(const struct node *n, char *out, int cap, int outer)
+{
+    int o = 0;
+    if (outer)
+        o = ser(n, out, cap - 1, 0);
+    else
+        for (const struct node *c = n->first; c; c = c->next)
+            o = ser(c, out, cap - 1, o);
+    out[o < cap - 1 ? o : cap - 1] = 0;
+    return o;
 }

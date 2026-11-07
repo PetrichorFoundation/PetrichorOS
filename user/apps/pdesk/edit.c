@@ -1,7 +1,10 @@
-/* Text editor: one flat buffer, line numbers, Ctrl+S to save. */
+/* Text editor: one flat buffer, line numbers, selection (Shift+arrows, mouse drag), clipboard (Ctrl+C/X/V),
+ * undo/redo (Ctrl+Z/Y), Ctrl+A, Ctrl+S to save; asks before closing with unsaved changes. */
 #include "desk.h"
 
-#define EMAX    65536
+#define EMAX    (1024 * 1024)
+#define NUNDO   100
+#define UNDO_BYTES (8 * 1024 * 1024)
 #define TOOL_H  30
 #define STAT_H  22
 #define GUTTER  44
@@ -13,7 +16,90 @@ struct editor {
     int len, cur, top, left, modified;
     int want_col;                       /* column to return to on Up/Down */
     char status[80];
+    int anchor;                         /* selection is [anchor, cur) in either order; -1 = none */
+    struct snap { char *buf; int len, cur; } undo[NUNDO], redo[NUNDO];
+    int nundo, nredo, last_kind, last_end, close_warned;
 };
+
+enum { K_NONE, K_TYPE, K_DEL, K_OTHER };
+
+static int sel_range(struct editor *e, int *a, int *b)
+{
+    if (e->anchor < 0 || e->anchor == e->cur)
+        return 0;
+    *a = e->anchor < e->cur ? e->anchor : e->cur;
+    *b = e->anchor < e->cur ? e->cur : e->anchor;
+    return 1;
+}
+
+static void snap_free(struct snap *s) { free(s->buf); s->buf = NULL; }
+
+static int snap_take(struct editor *e, struct snap *s)
+{
+    s->buf = malloc(e->len + 1);
+    if (!s->buf)
+        return -1;
+    memcpy(s->buf, e->buf, e->len);
+    s->len = e->len;
+    s->cur = e->cur;
+    return 0;
+}
+
+static void push(struct snap *stack, int *n, struct snap s)
+{
+    if (*n == NUNDO) {
+        snap_free(&stack[0]);
+        memmove(stack, stack + 1, (NUNDO - 1) * sizeof *stack);
+        (*n)--;
+    }
+    stack[(*n)++] = s;
+}
+
+/* Saves the state before an edit.  Runs of typing (or of deleting) at one spot make one undo step. */
+static void before_edit(struct editor *e, int kind)
+{
+    if (kind != K_OTHER && kind == e->last_kind && e->cur == e->last_end)
+        return;
+    long total = 0;
+    for (int i = 0; i < e->nundo; i++)
+        total += e->undo[i].len;
+    while (e->nundo && total + e->len > UNDO_BYTES) {          /* keep undo memory bounded */
+        total -= e->undo[0].len;
+        snap_free(&e->undo[0]);
+        memmove(e->undo, e->undo + 1, (e->nundo - 1) * sizeof e->undo[0]);
+        e->nundo--;
+    }
+    struct snap s;
+    if (snap_take(e, &s) == 0)
+        push(e->undo, &e->nundo, s);
+    while (e->nredo)
+        snap_free(&e->redo[--e->nredo]);
+}
+
+static void after_edit(struct editor *e, int kind)
+{
+    e->last_kind = kind;
+    e->last_end = e->cur;
+    e->close_warned = 0;
+}
+
+static void restore(struct editor *e, struct snap *from, int *nfrom, struct snap *to, int *nto)
+{
+    if (!*nfrom)
+        return;
+    struct snap cur;
+    if (snap_take(e, &cur) < 0)
+        return;
+    push(to, nto, cur);
+    struct snap s = from[--*nfrom];
+    memcpy(e->buf, s.buf, s.len);
+    e->len = s.len;
+    e->cur = s.cur > s.len ? s.len : s.cur;
+    free(s.buf);
+    e->anchor = -1;
+    e->last_kind = K_NONE;
+    e->modified = 1;
+}
 
 static int line_start(struct editor *e, int pos)
 {
@@ -122,6 +208,35 @@ static void erase(struct editor *e, int from, int n)
     }
 }
 
+static int erase_sel(struct editor *e)
+{
+    int a, b;
+    if (!sel_range(e, &a, &b))
+        return 0;
+    erase(e, a, b - a);
+    e->anchor = -1;
+    return 1;
+}
+
+static void copy_sel(struct editor *e)
+{
+    int a, b;
+    if (sel_range(e, &a, &b))
+        clip_set(e->buf + a, b - a);
+}
+
+static void paste(struct editor *e)
+{
+    int n;
+    const char *t = clip_get(&n);
+    if (!t)
+        return;
+    before_edit(e, K_OTHER);
+    erase_sel(e);
+    insert(e, t, n);
+    after_edit(e, K_OTHER);
+}
+
 static void scroll_to_cursor(struct editor *e, struct rect c)
 {
     int rows = rows_vis(c), cols = (c.w - GUTTER - 8) / 8;
@@ -162,9 +277,13 @@ static void ed_draw(struct win *w, struct rect c)
         char num[12];
         snprintf(num, sizeof num, "%d", ln + 1);
         gfx_text(c.x + GUTTER - 12 - gfx_text_width(num), y, num, C_TEXT_DIM);
-        int col = 0;
-        for (int i = pos; i < le; i++) {
-            int wdt = e->buf[i] == '\t' ? 4 - col % 4 : 1;
+        int col = 0, sa, sb, has = sel_range(e, &sa, &sb);
+        for (int i = pos; i <= le && i <= e->len; i++) {
+            int wdt = i < le && e->buf[i] == '\t' ? 4 - col % 4 : 1;
+            if (has && i >= sa && i < sb && col >= e->left)
+                gfx_fill(tx + (col - e->left) * 8, y, wdt * 8, 16, RGB(0xb8, 0xd4, 0xf4));
+            if (i == le)
+                break;
             if (e->buf[i] != '\t' && col >= e->left)
                 gfx_char(tx + (col - e->left) * 8, y, e->buf[i], C_TEXT);
             col += wdt;
@@ -195,11 +314,42 @@ static void ed_key(struct win *w, struct input_event *ev)
     int vertical = 0;
 
     if (ev->flags & IEF_CTRL) {
-        if (ev->code != 's' && ev->code != 'S')
-            return;
-        save(e);
+        int k = ev->code >= 'A' && ev->code <= 'Z' ? ev->code + 32 : ev->code;
+        if (k == 's') save(e);
+        else if (k == 'a') { e->anchor = 0; e->cur = e->len; }
+        else if (k == 'c') copy_sel(e);
+        else if (k == 'x') { copy_sel(e); before_edit(e, K_OTHER); erase_sel(e); after_edit(e, K_OTHER); }
+        else if (k == 'v') paste(e);
+        else if (k == 'z') restore(e, e->undo, &e->nundo, e->redo, &e->nredo);
+        else if (k == 'y') restore(e, e->redo, &e->nredo, e->undo, &e->nundo);
+        else return;
         wm_invalidate(w);
         return;
+    }
+    int moving = ev->code == KEY_LEFT || ev->code == KEY_RIGHT || ev->code == KEY_UP || ev->code == KEY_DOWN ||
+                 ev->code == KEY_PGUP || ev->code == KEY_PGDN || ev->code == KEY_HOME || ev->code == KEY_END;
+    if (moving) {
+        if (ev->flags & IEF_SHIFT) {
+            if (e->anchor < 0)
+                e->anchor = e->cur;
+        } else {
+            e->anchor = -1;
+        }
+        e->last_kind = K_NONE;
+    } else if (ev->code == KEY_DELETE || ev->code == 8 || ev->code == '\n' || ev->code == '\t' ||
+               (ev->code >= 32 && ev->code < 127)) {
+        int kind = ev->code == KEY_DELETE || ev->code == 8 ? K_DEL : K_TYPE;
+        int a, b, had = sel_range(e, &a, &b);
+        before_edit(e, had ? K_OTHER : kind);
+        if (had) {
+            erase_sel(e);
+            if (kind == K_DEL) {                       /* deleting a selection is the whole edit */
+                after_edit(e, K_OTHER);
+                wm_invalidate(w);
+                return;
+            }
+        }
+        e->anchor = -1;
     }
     switch (ev->code) {
     case KEY_LEFT:  if (e->cur > 0) e->cur--; break;
@@ -249,6 +399,11 @@ static void ed_key(struct win *w, struct input_event *ev)
             return;
         }
     }
+    if (!moving) {
+        after_edit(e, ev->code == KEY_DELETE || ev->code == 8 ? K_DEL : K_TYPE);
+        if (ev->code == '\n')
+            e->last_kind = K_NONE;                     /* each line is its own undo step */
+    }
     if (!vertical)
         e->want_col = -1;
     wm_invalidate(w);
@@ -257,9 +412,16 @@ static void ed_key(struct win *w, struct input_event *ev)
 static void ed_mouse(struct win *w, int x, int y, int kind)
 {
     struct editor *e = w->data;
-    if (kind != M_DOWN && kind != M_DBL)
+    if (kind == M_MDOWN) {
+        paste(e);
+        wm_invalidate(w);
+        return;
+    }
+    if (kind != M_DOWN && kind != M_DBL && kind != M_DRAG)
         return;
     if (y < TOOL_H) {
+        if (kind == M_DRAG)
+            return;
         if (x >= 6 && x < 62 && y >= 4 && y < 26) {
             save(e);
             wm_invalidate(w);
@@ -274,6 +436,9 @@ static void ed_mouse(struct win *w, int x, int y, int kind)
     }
     int want = (x - GUTTER) / 8 + e->left;
     e->cur = pos_at_vcol(e, pos, want < 0 ? 0 : want);
+    if (kind == M_DOWN)
+        e->anchor = e->cur;                            /* dragging from here selects */
+    e->last_kind = K_NONE;
     e->want_col = -1;
     wm_invalidate(w);
 }
@@ -296,15 +461,27 @@ static void ed_wheel(struct win *w, int dir)
     wm_invalidate(w);
 }
 
+static int ed_request_close(struct win *w)
+{
+    struct editor *e = w->data;
+    if (!e->modified || e->close_warned)
+        return 0;
+    e->close_warned = 1;
+    wm_notify("Unsaved changes: Ctrl+S saves, closing again discards them");
+    return 1;
+}
+
 static void ed_close(struct win *w)
 {
     struct editor *e = w->data;
+    for (int i = 0; i < e->nundo; i++) snap_free(&e->undo[i]);
+    for (int i = 0; i < e->nredo; i++) snap_free(&e->redo[i]);
     free(e->buf);
     free(e);
 }
 
 static const struct app editor_app = {.draw = ed_draw, .key = ed_key, .mouse = ed_mouse, .wheel = ed_wheel,
-                                      .close = ed_close};
+                                      .close = ed_close, .request_close = ed_request_close};
 
 void editor_open(const char *path)
 {
@@ -317,6 +494,7 @@ void editor_open(const char *path)
         return;
     }
     e->want_col = -1;
+    e->anchor = -1;
     if (path) {
         safestrcpy(e->path, path, sizeof e->path);
         int fd = open(path, O_RDONLY);

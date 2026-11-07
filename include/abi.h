@@ -58,6 +58,7 @@
 #define IEF_SHIFT   0x02
 #define IEF_CTRL    0x04
 #define IEF_ALT     0x08
+#define IEF_ABS     0x10        /* mouse: dx, dy are an absolute position, 0..32767 across the screen */
 #define BTN_LEFT    1
 #define BTN_RIGHT   2
 #define BTN_MIDDLE  4
@@ -72,7 +73,8 @@
 #define KEY_PGDN    0x108
 #define KEY_DELETE  0x109
 #define KEY_INSERT  0x10A
-#define KEY_F1      0x111   /* F1..F10 are consecutive */
+#define KEY_F1      0x111   /* F1..F12 are consecutive */
+#define KEY_PRINT   0x11D   /* Print Screen */
 
 #define POLLIN   1
 #define POLLOUT  4              /* a pipe has room for at least 512 more bytes */
@@ -208,6 +210,8 @@ struct pollfd {
 struct fbinfo {
     u32 addr;                   /* user virtual address of the framebuffer */
     u32 width, height, pitch;   /* pitch in bytes; pixels are 0x00RRGGBB */
+    u32 mon_w, mon_h, mon_mhz;  /* the monitor's preferred mode from its EDID (0 if unknown); refresh in millihertz */
+    u32 fixed;                  /* 1: the mode was set at boot and cannot change; 0: the driver can switch modes */
 };
 
 struct rtc_time {

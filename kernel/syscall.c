@@ -277,7 +277,7 @@ static int sys_shutdown(int mode)
     kprintf("\n[sys ] %s...\n", mode == SHUT_REBOOT ? "rebooting" : "powering off");
     cli();
     if (mode == SHUT_REBOOT) {
-        outb(0x64, 0xFE);                       /* pulse the CPU reset line */
+        acpi_reset();                           /* does not return */
     } else {
         acpi_poweroff();                        /* real hardware (and QEMU): ACPI soft-off */
         outw(0x604, 0x2000);                    /* QEMU fallbacks */
@@ -551,7 +551,7 @@ int syscall_dispatch(struct regs *r)
             memset(&di[n], 0, sizeof di[n]);
             di[n].sectors = blk_sectors(i);
             di[n].index = i;
-            di[n].boot = i == boot_disk;
+            di[n].boot = i == boot_disk || i == live_disk;
             di[n].bus = blk_bus(i);
             safestrcpy(di[n].name, blk_name(i), sizeof di[n].name);
             safestrcpy(di[n].model, blk_model(i), sizeof di[n].model);

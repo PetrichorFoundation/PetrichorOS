@@ -7,7 +7,8 @@
  *   3 ..        inode table (64-byte inodes)
  *   data_start  file and directory data
  *
- * Inodes hold 12 direct blocks and one indirect block (max file ~4 MiB).
+ * Inodes hold 12 direct blocks, one indirect and one double-indirect block (files up to 4 GiB).
+ * The block bitmap takes as many blocks as the partition needs (bbitmap .. itable-1).
  * Directories are files of 32-byte {ino, name} entries; ino 0 marks a free
  * slot.  Every write goes straight through the buffer cache to the disk, so
  * the on-disk image is always current (no sync needed). */
@@ -18,11 +19,12 @@
 #define SPB        (BLK / 512)
 #define NDIRECT    12
 #define NINDIRECT  (BLK / 4)
-#define NINODES    1024
+#define NINODES    16384              /* new filesystems; older ones keep their own count */
 #define ISIZE      64
 #define IPB        (BLK / ISIZE)
-#define MAX_BLOCKS (BLK * 8)            /* one bitmap block */
-#define MAXFILE    ((NDIRECT + NINDIRECT) * BLK)
+#define BPB        (BLK * 8)            /* blocks covered by one bitmap block */
+#define MAX_BLOCKS (BPB * 128)          /* 16 GiB */
+#define MAXFILE    0xFFFFFFFFu
 #define DESIZE     32
 
 struct psuper {
@@ -34,7 +36,7 @@ struct pdinode {
     u32 size;
     u32 dblk[NDIRECT];
     u32 iblk;
-    u32 pad;
+    u32 i2blk;                          /* double indirect (0 on filesystems from older versions) */
 };
 
 struct pdent {
@@ -103,28 +105,47 @@ static int bit_test(const u8 *map, u32 i) { return map[i >> 3] & (1 << (i & 7));
 static void bit_set(u8 *map, u32 i) { map[i >> 3] |= 1 << (i & 7); }
 static void bit_clear(u8 *map, u32 i) { map[i >> 3] &= ~(1 << (i & 7)); }
 
-static u32 balloc(void)
+static u32 alloc_hint;
+
+static u32 bscan(u32 from, u32 to)
 {
-    struct buf *b = bread(sb.bbitmap);
-    for (u32 i = sb.data_start; i < sb.nblocks; i++) {
-        if (bit_test(b->data, i))
+    for (u32 i = from; i < to;) {
+        struct buf *b = bread(sb.bbitmap + i / BPB);
+        u32 o = i % BPB;
+        if ((o & 7) == 0 && i + 8 <= to && b->data[o >> 3] == 0xFF) {
+            i += 8;                             /* a full byte */
             continue;
-        bit_set(b->data, i);
-        bwrite(b);
-        struct buf *z = bnew(i);                /* fresh blocks read back as zeros */
-        bwrite(z);
-        return i;
+        }
+        if (!bit_test(b->data, o)) {
+            bit_set(b->data, o);
+            bwrite(b);
+            struct buf *z = bnew(i);            /* fresh blocks read back as zeros */
+            bwrite(z);
+            alloc_hint = i + 1;
+            return i;
+        }
+        i++;
     }
     return 0;
 }
 
+static u32 balloc(void)
+{
+    if (alloc_hint < sb.data_start || alloc_hint >= sb.nblocks)
+        alloc_hint = sb.data_start;
+    u32 start = alloc_hint, blk = bscan(start, sb.nblocks);
+    return blk ? blk : bscan(sb.data_start, start);
+}
+
 static void bfree(u32 blk)
 {
-    if (!blk)
+    if (!blk || blk >= sb.nblocks)
         return;
-    struct buf *b = bread(sb.bbitmap);
-    bit_clear(b->data, blk);
+    struct buf *b = bread(sb.bbitmap + blk / BPB);
+    bit_clear(b->data, blk % BPB);
     bwrite(b);
+    if (blk < alloc_hint)
+        alloc_hint = blk;
 }
 
 static u32 ialloc(void)
@@ -158,6 +179,7 @@ static void iupdate(struct inode *ip)
     d->size = ip->size;
     memcpy(d->dblk, ip->dblk, sizeof d->dblk);
     d->iblk = ip->iblk;
+    d->i2blk = ip->i2blk;
     bwrite(b);
 }
 
@@ -193,7 +215,29 @@ static struct inode *iget(u32 dino)
     ip->size = d->size;
     memcpy(ip->dblk, d->dblk, sizeof ip->dblk);
     ip->iblk = d->iblk;
+    ip->i2blk = d->i2blk;
     return ip;
+}
+
+/* Entry `idx` of the pointer block `*holder`, allocating the pointer block and/or the entry when asked to. */
+static u32 slot(u32 *holder, u32 idx, int alloc, int *dirty)
+{
+    if (!*holder) {
+        if (!alloc || !(*holder = balloc()))
+            return 0;
+        if (dirty)
+            *dirty = 1;
+    }
+    u32 blk = ((u32 *)bread(*holder)->data)[idx];
+    if (!blk && alloc) {
+        blk = balloc();
+        if (!blk)
+            return 0;
+        struct buf *b = bread(*holder);         /* balloc may have recycled the buffer */
+        ((u32 *)b->data)[idx] = blk;
+        bwrite(b);
+    }
+    return blk;
 }
 
 /* Maps file block `idx` to a disk block, allocating it when asked to. */
@@ -205,22 +249,15 @@ static u32 bmap(struct inode *ip, u32 idx, int alloc)
         return ip->dblk[idx];
     }
     idx -= NDIRECT;
-    if (idx >= NINDIRECT)
+    if (idx < NINDIRECT)
+        return slot(&ip->iblk, idx, alloc, NULL);
+    idx -= NINDIRECT;
+    if (idx >= NINDIRECT * NINDIRECT)
         return 0;
-    if (!ip->iblk) {
-        if (!alloc || !(ip->iblk = balloc()))
-            return 0;
-    }
-    u32 blk = ((u32 *)bread(ip->iblk)->data)[idx];
-    if (!blk && alloc) {
-        blk = balloc();
-        if (!blk)
-            return 0;
-        struct buf *b = bread(ip->iblk);        /* balloc may have recycled the buffer */
-        ((u32 *)b->data)[idx] = blk;
-        bwrite(b);
-    }
-    return blk;
+    u32 mid = slot(&ip->i2blk, idx / NINDIRECT, alloc, NULL);
+    if (!mid)
+        return 0;
+    return slot(&mid, idx % NINDIRECT, alloc, NULL);
 }
 
 int pfs_read(struct inode *ip, u32 off, void *dst, u32 n)
@@ -247,7 +284,7 @@ int pfs_read(struct inode *ip, u32 off, void *dst, u32 n)
 
 int pfs_write(struct inode *ip, u32 off, const void *src, u32 n)
 {
-    if (off + n < off || off + n > MAXFILE)
+    if (off + n < off)
         return -EFBIG;
     const u8 *in = src;
     u32 done = 0;
@@ -280,6 +317,18 @@ void pfs_truncate(struct inode *ip)
             bfree(((u32 *)bread(ip->iblk)->data)[i]);
         bfree(ip->iblk);
         ip->iblk = 0;
+    }
+    if (ip->i2blk) {
+        for (u32 i = 0; i < NINDIRECT; i++) {
+            u32 mid = ((u32 *)bread(ip->i2blk)->data)[i];
+            if (!mid)
+                continue;
+            for (u32 k = 0; k < NINDIRECT; k++)
+                bfree(((u32 *)bread(mid)->data)[k]);
+            bfree(mid);
+        }
+        bfree(ip->i2blk);
+        ip->i2blk = 0;
     }
     ip->size = 0;
     iupdate(ip);
@@ -499,14 +548,20 @@ int pfs_rename(struct inode *op, const char *oname, struct inode *np, const char
 static int format(u32 nblocks)
 {
     kprintf("[pfs ] formatting %u blocks\n", nblocks);
-    sb = (struct psuper){PFS_MAGIC, nblocks, NINODES, 1, 2, 3, 3 + NINODES * ISIZE / BLK, 1};
+    u32 nbb = (nblocks + BPB - 1) / BPB, ninodes = NINODES;
+    if (ninodes > nblocks / 4)                                     /* small disks: one inode per 16 KiB */
+        ninodes = nblocks / 4 < 1024 ? 1024 : nblocks / 4 & ~63u;
+    sb = (struct psuper){PFS_MAGIC, nblocks, ninodes, 1, 2, 2 + nbb, 2 + nbb + ninodes * ISIZE / BLK, 1};
+    alloc_hint = 0;
     for (u32 i = 0; i < sb.data_start; i++)
         bwrite(bnew(i));
 
-    struct buf *b = bread(sb.bbitmap);
-    for (u32 i = 0; i < sb.data_start; i++)
-        bit_set(b->data, i);
-    bwrite(b);
+    struct buf *b;
+    for (u32 i = 0; i < sb.data_start; i++) {
+        b = bread(sb.bbitmap + i / BPB);
+        bit_set(b->data, i % BPB);
+        bwrite(b);
+    }
     b = bread(sb.ibitmap);
     bit_set(b->data, 0);
     bit_set(b->data, 1);
@@ -540,7 +595,8 @@ int pfs_mount(struct inode *mp)
         nblocks = MAX_BLOCKS;
 
     struct psuper *disk = (struct psuper *)bread(0)->data;
-    if (disk->magic == PFS_MAGIC && disk->nblocks == nblocks) {
+    if (disk->magic == PFS_MAGIC && disk->nblocks <= nblocks && disk->nblocks >= 64 &&
+        (disk->nblocks == nblocks || disk->nblocks == BLK * 8)) {   /* older versions capped filesystems at 128 MiB: keep them */
         sb = *disk;
     } else if (format(nblocks) < 0) {
         return -EIO;
@@ -565,11 +621,17 @@ void pfs_stats(u32 *total_kb, u32 *free_kb)
     *total_kb = *free_kb = 0;
     if (!mounted)
         return;
-    struct buf *b = bread(sb.bbitmap);
     u32 used = 0;
-    for (u32 i = 0; i < sb.nblocks; i++)
-        if (bit_test(b->data, i))
-            used++;
+    for (u32 k = 0; k * BPB < sb.nblocks; k++) {
+        struct buf *b = bread(sb.bbitmap + k);
+        u32 n = sb.nblocks - k * BPB < BPB ? sb.nblocks - k * BPB : BPB;
+        for (u32 i = 0; i < n / 8; i++) {
+            u8 v = b->data[i];
+            while (v) { used += v & 1; v >>= 1; }
+        }
+        for (u32 i = n / 8 * 8; i < n; i++)
+            used += bit_test(b->data, i) ? 1 : 0;
+    }
     *total_kb = (sb.nblocks - sb.data_start) * (BLK / 1024);
     *free_kb = (sb.nblocks - used) * (BLK / 1024);
 }

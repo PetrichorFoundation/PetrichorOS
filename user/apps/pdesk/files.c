@@ -27,13 +27,14 @@ static const struct {
 } sidebar[] = {
     {"Computer", "/", ICON_DISK},
     {"Home", "/disk", ICON_HOME},
+    {"Pictures", "/disk/Pictures", ICON_FOLDER},
     {"Programs", "/bin", ICON_FOLDER},
     {"Disk bin", "/disk/bin", ICON_EXEC},
     {"Temp", "/tmp", ICON_FOLDER},
     {"Config", "/etc", ICON_FOLDER},
     {"Devices", "/dev", ICON_FOLDER},
 };
-#define NSIDE 7
+#define NSIDE 8
 
 static int cmp_ent(const struct fent *a, const struct fent *b)
 {
@@ -159,6 +160,14 @@ static void open_entry(struct files *f, int i)
         return;
     }
     int pl = strlen(p);
+    static const char *const imgs[] = {".png", ".jpg", ".jpeg", ".gif", ".PNG", ".JPG", ".JPEG", ".GIF"};
+    for (int k = 0; k < 8; k++) {
+        int m = strlen(imgs[k]);
+        if (pl > m && !strcmp(p + pl - m, imgs[k])) {
+            viewer_open(p);
+            return;
+        }
+    }
     if ((pl > 5 && !strcmp(p + pl - 5, ".html")) || (pl > 4 && !strcmp(p + pl - 4, ".htm"))) {
         char url[PATH_MAX + 8];
         snprintf(url, sizeof url, "file://%s", p);
@@ -348,12 +357,106 @@ static void files_mouse(struct win *w, int x, int y, int kind)
     wm_invalidate(w);
 }
 
+/* ---------------- copy and paste ---------------- */
+
+static char copied[PATH_MAX];                      /* shared by every Files window */
+
+static int copy_file(const char *from, const char *to)
+{
+    int in = open(from, O_RDONLY);
+    if (in < 0)
+        return in;
+    int out = open(to, O_WRONLY | O_CREAT | O_TRUNC);
+    if (out < 0) {
+        close(in);
+        return out;
+    }
+    static char buf[16384];
+    int r, e = 0;
+    while ((r = read(in, buf, sizeof buf)) > 0)
+        if (write(out, buf, r) != r) {
+            e = -ENOSPC;
+            break;
+        }
+    close(in);
+    close(out);
+    return r < 0 ? r : e;
+}
+
+static int copy_tree(const char *from, const char *to, int depth)
+{
+    struct stat st;
+    if (stat(from, &st) < 0)
+        return -ENOENT;
+    if (st.type != T_DIR)
+        return copy_file(from, to);
+    if (depth > 16)
+        return -EINVAL;
+    int e = mkdir(to);
+    if (e < 0 && e != -EEXIST)
+        return e;
+    int fd = open(from, O_RDONLY);
+    if (fd < 0)
+        return fd;
+    struct dirent de;
+    int err = 0;
+    while (!err && readdir(fd, &de) > 0) {
+        if (!strcmp(de.name, ".") || !strcmp(de.name, ".."))
+            continue;
+        char a[PATH_MAX], b[PATH_MAX];
+        snprintf(a, sizeof a, "%s/%s", from, de.name);
+        snprintf(b, sizeof b, "%s/%s", to, de.name);
+        err = copy_tree(a, b, depth + 1);
+    }
+    close(fd);
+    return err;
+}
+
+static void paste(struct files *f)
+{
+    if (!copied[0]) {
+        snprintf(f->status, sizeof f->status, "Nothing copied (select a file and press Ctrl+C)");
+        return;
+    }
+    const char *base = strrchr(copied, '/');
+    base = base ? base + 1 : copied;
+    char dst[PATH_MAX];
+    struct stat st;
+    snprintf(dst, sizeof dst, "%s%s%s", f->path, f->path[1] ? "/" : "", base);
+    for (int i = 2; stat(dst, &st) == 0 && i < 100; i++)        /* never overwrite: "name (2)", "name (3)", ... */
+        snprintf(dst, sizeof dst, "%s%s%s (%d)", f->path, f->path[1] ? "/" : "", base, i);
+    int plen = strlen(copied);
+    if (!strncmp(dst, copied, plen) && dst[plen] == '/') {
+        snprintf(f->status, sizeof f->status, "Can't paste a folder inside itself");
+        return;
+    }
+    int e = copy_tree(copied, dst, 0);
+    snprintf(f->status, sizeof f->status, e < 0 ? "Paste failed: %s" : "Pasted %s", e < 0 ? strerror(e) : base);
+    reload(f);
+}
+
 static void files_key(struct win *w, struct input_event *e)
 {
     struct files *f = w->data;
     struct rect c = wm_client(w);
     int rows = visible_rows(c);
     if (rows < 1) rows = 1;
+    if ((e->flags & IEF_CTRL) && (e->code == 'c' || e->code == 'C')) {
+        if (f->sel >= 0 && f->sel < f->n) {
+            snprintf(copied, sizeof copied, "%s%s%s", f->path, f->path[1] ? "/" : "", f->ents[f->sel].name);
+            snprintf(f->status, sizeof f->status, "Copied %s: open a folder and press Ctrl+V", f->ents[f->sel].name);
+            clip_set(copied, strlen(copied));
+        }
+        wm_invalidate(w);
+        return;
+    }
+    if ((e->flags & IEF_CTRL) && (e->code == 'v' || e->code == 'V')) {
+        paste(f);
+        wm_invalidate(w);
+        return;
+    }
+    if (e->flags & IEF_CTRL)
+        return;
     switch (e->code) {
     case KEY_UP:   if (f->sel > 0) f->sel--; else if (f->sel < 0 && f->n) f->sel = 0; break;
     case KEY_DOWN: if (f->sel < f->n - 1) f->sel++; break;

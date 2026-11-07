@@ -35,6 +35,9 @@ struct term {
     int inlen;
     int fg, bold;
     int esc, ep[4], np;
+    long view_top;               /* absolute line shown in the first row (for mouse selection) */
+    long sel_a, sel_b;           /* selection: absolute positions line * TCOLS + col, half-open; equal = none */
+    int selecting;
 };
 
 static const u32 palette[16] = {
@@ -144,11 +147,18 @@ static void term_draw(struct win *w, struct rect c)
         t->scroll = (long)t->line - rows + 1 - top;
         if (t->scroll < 0) t->scroll = 0;
     }
+    t->view_top = top;
     for (int r = 0; r < rows; r++) {
         long idx = top + r;
         if (idx > (long)t->line)
             break;
         const u8 *chs = t->ch[idx % TLINES], *cs = t->col[idx % TLINES];
+        long lo = t->sel_a < t->sel_b ? t->sel_a : t->sel_b, hi = t->sel_a < t->sel_b ? t->sel_b : t->sel_a;
+        for (int x = 0; x < cols; x++) {
+            long p = idx * TCOLS + x;
+            if (p >= lo && p < hi)
+                gfx_fill(c.x + 4 + x * 8, c.y + 2 + r * 16, 8, 16, RGB(0x3a, 0x5a, 0x80));
+        }
         for (int x = 0; x < cols; x++)
             if (chs[x] != ' ')
                 gfx_char(c.x + 4 + x * 8, c.y + 2 + r * 16, chs[x], palette[cs[x] & 15]);
@@ -409,6 +419,9 @@ static void term_fdready(struct win *w, struct pollfd *p)
     wm_invalidate_rect(w->x, w->y + TITLE_H, w->w, w->h - TITLE_H);
 }
 
+static void paste_text(struct win *w, struct term *t, const char *s, int n);
+static void copy_selection(struct term *t);
+
 static void term_key(struct win *w, struct input_event *e)
 {
     struct term *t = w->data;
@@ -416,6 +429,19 @@ static void term_key(struct win *w, struct input_event *e)
     int rows = (c.h - 4) / 16;
     int ctrl = e->flags & IEF_CTRL;
 
+    if (ctrl && (e->flags & IEF_SHIFT) && (e->code == 'c' || e->code == 'C')) {   /* Ctrl+Shift+C/V: copy, paste */
+        copy_selection(t);
+        return;
+    }
+    if (ctrl && (e->flags & IEF_SHIFT) && (e->code == 'v' || e->code == 'V')) {
+        int n;
+        const char *c = clip_get(&n);
+        if (c && t->alive)
+            paste_text(w, t, c, n);
+        return;
+    }
+    if (e->code >= 32 && e->code < 127)
+        t->sel_a = t->sel_b = 0;                            /* typing clears the highlight */
     if (e->code == KEY_PGUP) { t->scroll += rows / 2; }
     else if (e->code == KEY_PGDN) { t->scroll -= rows / 2; if (t->scroll < 0) t->scroll = 0; }
     else if (!t->alive) { return; }
@@ -458,6 +484,68 @@ static void term_key(struct win *w, struct input_event *e)
     wm_invalidate_rect(w->x, w->y + TITLE_H, w->w, w->h - TITLE_H);
 }
 
+static void paste_text(struct win *w, struct term *t, const char *s, int n)
+{
+    for (int i = 0; i < n; i++) {
+        struct input_event e = {.type = INPUT_KEY, .flags = IEF_DOWN, .code = (u8)s[i] == '\r' ? 0 : (u8)s[i]};
+        if (s[i] == '\t')
+            e.code = ' ';
+        if (e.code == '\n' || (e.code >= 32 && e.code < 127))
+            term_key(w, &e);
+    }
+}
+
+static void copy_selection(struct term *t)
+{
+    long lo = t->sel_a < t->sel_b ? t->sel_a : t->sel_b, hi = t->sel_a < t->sel_b ? t->sel_b : t->sel_a;
+    if (lo == hi)
+        return;
+    static char out[TLINES * (TCOLS + 1)];
+    int n = 0;
+    for (long l = lo / TCOLS; l <= (hi - 1) / TCOLS && n < (int)sizeof out - TCOLS - 2; l++) {
+        if (l > (long)t->line || l < (long)t->line - TLINES + 1)
+            continue;
+        int c0 = l == lo / TCOLS ? lo % TCOLS : 0, c1 = l == (hi - 1) / TCOLS ? (hi - 1) % TCOLS + 1 : t->cols;
+        int start = n;
+        for (int x = c0; x < c1; x++)
+            out[n++] = t->ch[l % TLINES][x];
+        while (n > start && out[n - 1] == ' ')
+            n--;                                            /* no trailing blanks */
+        if (l != (hi - 1) / TCOLS)
+            out[n++] = '\n';
+    }
+    clip_set(out, n);
+}
+
+static void term_mouse(struct win *w, int x, int y, int kind)
+{
+    struct term *t = w->data;
+    int col = (x - 4) / 8, row = (y - 2) / 16;
+    if (col < 0) col = 0;
+    if (col > t->cols) col = t->cols;
+    if (row < 0) row = 0;
+    long p = (t->view_top + row) * TCOLS + col;
+    if (kind == M_MDOWN) {
+        int n;
+        const char *c = clip_get(&n);
+        if (c && t->alive)
+            paste_text(w, t, c, n);
+        return;
+    }
+    if (kind == M_DOWN) {
+        t->sel_a = t->sel_b = p;
+        t->selecting = 1;
+    } else if (kind == M_DRAG && t->selecting) {
+        t->sel_b = p;
+    } else if (kind == M_UP && t->selecting) {
+        t->selecting = 0;
+        copy_selection(t);                                  /* like X11: selecting copies */
+    } else {
+        return;
+    }
+    wm_invalidate_rect(w->x, w->y + TITLE_H, w->w, w->h - TITLE_H);
+}
+
 static void term_wheel(struct win *w, int dir)
 {
     struct term *t = w->data;
@@ -469,6 +557,7 @@ static void term_wheel(struct win *w, int dir)
 
 static const struct app term_app = {
     .wheel = term_wheel,
+    .mouse = term_mouse,
     .draw = term_draw,
     .key = term_key,
     .pollfds = term_pollfds,

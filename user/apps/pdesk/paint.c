@@ -206,3 +206,17 @@ int page_link_at(struct page *p, int x, int y)
     }
     return -1;
 }
+
+/* The element (or text node) drawn at a page position: the topmost display-list item there. */
+struct node *page_node_at(struct page *p, int x, int y)
+{
+    for (int i = p->ncmds - 1; i >= 0; i--) {
+        const struct cmd *c = &p->cmds[i];
+        if (!c->node) continue;
+        int h = c->kind == K_TEXT ? c->fsize + 3 : c->h;
+        int cy = c->kind == K_TEXT ? c->y - 1 : c->y;
+        if (x >= c->x && x < c->x + c->w && y >= cy && y < cy + h)
+            return c->node;
+    }
+    return p->body;
+}

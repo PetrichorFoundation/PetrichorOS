@@ -154,6 +154,7 @@ void timer_tick(struct regs *r)
             p->state = PS_RUNNABLE;
     }
     net_tick();
+    usb_tick();
     if ((r->cs & 3) == 3)
         yield();                        /* preempt user code only */
 }

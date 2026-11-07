@@ -2,8 +2,13 @@
 #pragma once
 #include "gfx.h"
 
-#define SCREEN_W 1024
-#define SCREEN_H 768
+/* The desktop's drawing size.  It is the monitor's native mode unless Settings picks a smaller one, in which
+ * case the desktop renders at that size and is scaled up to the screen. */
+extern int screen_w, screen_h;
+#define SCREEN_W screen_w
+#define SCREEN_H screen_h
+#define MAX_SCREEN_W 2560
+#define MAX_SCREEN_H 1600
 #define PANEL_H  28
 #define TITLE_H  26
 #define DOCK_H   58
@@ -28,7 +33,7 @@ extern u32 g_accent;                     /* user-selectable (Settings) */
 
 static inline int abs_i(int v) { return v < 0 ? -v : v; }
 
-enum { M_MOVE, M_DOWN, M_UP, M_DRAG, M_DBL, M_RDOWN };
+enum { M_MOVE, M_DOWN, M_UP, M_DRAG, M_DBL, M_RDOWN, M_MDOWN };   /* M_MDOWN: middle button (paste) */
 
 struct win;
 
@@ -43,6 +48,7 @@ struct app {
     void (*fdready)(struct win *w, struct pollfd *p);
     void (*close)(struct win *w);
     int (*request_close)(struct win *w);                   /* the user clicked X: return 1 to handle it (and close later) */
+    int (*frame)(struct win *w, u32 now_ms);               /* every pass of the event loop: ms until it wants the next (-1 none) */
 };
 
 struct win {
@@ -74,13 +80,32 @@ int wm_installer_available(void);                           /* a second disk we 
 #define NACCENT 6
 extern int g_wall, g_accent_idx;
 extern int g_animations;                                    /* window and menu animations on/off */
+struct display_info {
+    int screen_w, screen_h;      /* what the framebuffer really is */
+    int mon_w, mon_h, mon_mhz;   /* the monitor's preferred mode (EDID), 0 if unknown */
+    int render_w, render_h;      /* the desktop's drawing size */
+    int fixed;                   /* the video mode was set by the bootloader */
+    int fps;                     /* frame-rate cap while animating */
+};
+void display_get(struct display_info *d);
+int display_set(int w, int h);                              /* applies and saves; -1 if it doesn't fit */
+void fps_set(int fps);                                      /* applies and saves */
 void anim_set(int on);                                      /* applies and saves */
 const char *theme_wall_name(int i);
 u32 theme_wall_color(int i);
 u32 theme_accent_color(int i);
 void theme_set(int wall, int accent_idx);                   /* applies and saves */
 
+/* clipboard (main.c): shared by every app in the desktop */
+void clip_set(const char *text, int len);
+const char *clip_get(int *len);                             /* NULL when empty */
+
+/* power (main.c) */
+extern int g_blank_min;                                     /* turn the screen off after this many idle minutes; 0 = never */
+void blank_set(int minutes);                                /* applies and saves */
+
 /* apps */
+void viewer_open(const char *path);                         /* image viewer (PNG, JPEG, GIF) */
 void term_open(const char *initial_command);                /* NULL = just a shell */
 void files_open(const char *path);
 void editor_open(const char *path);                         /* NULL = empty buffer */

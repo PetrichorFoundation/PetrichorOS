@@ -33,7 +33,7 @@ static int map_user_fb(u32 phys, u32 bytes)
 int gfx_map(struct fbinfo *out, u32 w, u32 h)
 {
     if (bootinfo.fb_addr && bootinfo.fb_bpp == 32) {          /* VESA mode set by our bootloader */
-        if (w != bootinfo.fb_w || h != bootinfo.fb_h)
+        if (w && (w != bootinfo.fb_w || h != bootinfo.fb_h))     /* 0x0: whatever the bootloader chose */
             return -EINVAL;
         int e = map_user_fb(bootinfo.fb_addr, bootinfo.fb_pitch * bootinfo.fb_h);
         if (e < 0)
@@ -44,9 +44,17 @@ int gfx_map(struct fbinfo *out, u32 w, u32 h)
         out->width = bootinfo.fb_w;
         out->height = bootinfo.fb_h;
         out->pitch = bootinfo.fb_pitch;
+        out->mon_w = bootinfo.edid_w;
+        out->mon_h = bootinfo.edid_h;
+        out->mon_mhz = bootinfo.edid_mhz;
+        out->fixed = 1;
         return 0;
     }
-    if (w < 320 || h < 200 || w > 1920 || h > 1200)
+    if (!w) {
+        w = 1024;
+        h = 768;
+    }
+    if (w < 320 || h < 200 || w > 2560 || h > 1600)
         return -EINVAL;
     u32 slot;
     for (slot = 0; slot < 32; slot++)
@@ -74,6 +82,8 @@ int gfx_map(struct fbinfo *out, u32 w, u32 h)
     out->width = w;
     out->height = h;
     out->pitch = w * 4;
+    out->mon_w = out->mon_h = out->mon_mhz = 0;
+    out->fixed = 0;
     return 0;
 }
 

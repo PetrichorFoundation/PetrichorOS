@@ -198,12 +198,17 @@ copy_kernel_image:
     or dword ptr [MBI], 8           # flags bit 3: modules present
     ret
 
-# Looks for a 1024x768, 32-bit, B-G-R linear-framebuffer mode and switches to it.
+# Reads the monitor's EDID (VBE/DDC) for its preferred resolution, then switches to the largest 32-bit
+# B-G-R linear-framebuffer mode that fits inside it (1024x768 when there is no EDID, never above 2560x1600).
 # On success it fills the Multiboot framebuffer fields; on failure the screen stays in text mode.
+.set EDID_BUF, 0x9400
 vbe_setup:
     push es
     xor ax, ax
     mov es, ax
+    call read_edid
+    mov dword ptr [best_area], 0
+    mov word ptr [best_mode], 0
     mov di, VBE_INFO
     mov dword ptr [VBE_INFO], 0x32454256      # "VBE2": ask for VBE 2.0+ information
     mov ax, 0x4F00
@@ -217,7 +222,7 @@ vbe_setup:
     mov cx, word ptr fs:[si]
     add si, 2
     cmp cx, 0xFFFF
-    je .fail
+    je .pick
     push si
     push cx
     push fs
@@ -233,10 +238,6 @@ vbe_setup:
     and ax, 0x0081                            # supported + linear framebuffer
     cmp ax, 0x0081
     jne .next
-    cmp word ptr [VBE_MODE + 0x12], 1024
-    jne .next
-    cmp word ptr [VBE_MODE + 0x14], 768
-    jne .next
     cmp byte ptr [VBE_MODE + 0x19], 32
     jne .next
     cmp byte ptr [VBE_MODE + 0x1B], 6         # direct colour
@@ -245,7 +246,28 @@ vbe_setup:
     jne .next
     cmp byte ptr [VBE_MODE + 0x22], 8
     jne .next
-    mov bx, cx
+    movzx eax, word ptr [VBE_MODE + 0x12]
+    movzx edx, word ptr [VBE_MODE + 0x14]
+    cmp ax, word ptr [want_w]
+    ja .next
+    cmp dx, word ptr [want_h]
+    ja .next
+    imul eax, edx
+    cmp eax, dword ptr [best_area]
+    jbe .next
+    mov dword ptr [best_area], eax
+    mov word ptr [best_mode], cx
+    jmp .next
+.pick:
+    mov cx, word ptr [best_mode]
+    test cx, cx
+    jz .fail
+    mov ax, 0x4F01
+    mov di, VBE_MODE
+    int 0x10
+    cmp ax, 0x004F
+    jne .fail
+    mov bx, word ptr [best_mode]
     or bx, 0x4000                             # use the linear framebuffer
     mov ax, 0x4F02
     int 0x10
@@ -256,14 +278,91 @@ vbe_setup:
     mov dword ptr [MBI + 92], 0
     movzx eax, word ptr [VBE_MODE + 0x10]
     mov dword ptr [MBI + 96], eax
-    mov dword ptr [MBI + 100], 1024
-    mov dword ptr [MBI + 104], 768
+    movzx eax, word ptr [VBE_MODE + 0x12]
+    mov dword ptr [MBI + 100], eax
+    movzx eax, word ptr [VBE_MODE + 0x14]
+    mov dword ptr [MBI + 104], eax
     mov byte ptr [MBI + 108], 32
     mov byte ptr [MBI + 109], 1               # direct RGB
     or dword ptr [MBI], 0x1000                # flags bit 12: framebuffer info present
 .fail:
     pop es
     ret
+
+# Sets want_w/want_h from the monitor's preferred timing; also hands the raw EDID size and refresh rate on
+# to the kernel (MBI+128: width, height, millihertz, "EDID").
+read_edid:
+    mov word ptr [want_w], 1024
+    mov word ptr [want_h], 768
+    mov dword ptr [EDID_BUF], 0
+    mov dword ptr [MBI + 128], 0
+    mov dword ptr [MBI + 132], 0
+    mov dword ptr [MBI + 136], 0
+    mov dword ptr [MBI + 140], 0
+    mov ax, 0x4F15
+    mov bl, 1
+    xor cx, cx
+    xor dx, dx
+    mov di, EDID_BUF
+    int 0x10
+    cmp ax, 0x004F
+    jne 9f
+    cmp dword ptr [EDID_BUF], 0xFFFFFF00     # header 00 FF FF FF FF FF FF 00
+    jne 9f
+    cmp word ptr [EDID_BUF + 54], 0           # preferred detailed timing: pixel clock
+    je 9f
+    movzx eax, byte ptr [EDID_BUF + 56]
+    movzx edx, byte ptr [EDID_BUF + 58]
+    and dl, 0xF0
+    shl edx, 4
+    or eax, edx                               # eax = horizontal active
+    movzx ecx, byte ptr [EDID_BUF + 59]
+    movzx edx, byte ptr [EDID_BUF + 61]
+    and dl, 0xF0
+    shl edx, 4
+    or ecx, edx                               # ecx = vertical active
+    cmp eax, 640
+    jb 9f
+    cmp ecx, 480
+    jb 9f
+    cmp eax, 8192
+    ja 9f
+    cmp ecx, 8192
+    ja 9f
+    mov dword ptr [MBI + 128], eax
+    mov dword ptr [MBI + 132], ecx
+    mov word ptr [want_w], ax
+    mov word ptr [want_h], cx
+    cmp ax, 2560
+    jbe 1f
+    mov word ptr [want_w], 2560
+1:  cmp cx, 1600
+    jbe 2f
+    mov word ptr [want_h], 1600
+2:  movzx ebx, byte ptr [EDID_BUF + 57]       # horizontal total = active + blanking
+    movzx edx, byte ptr [EDID_BUF + 58]
+    and dx, 0x0F
+    shl edx, 8
+    or ebx, edx
+    add ebx, eax
+    movzx esi, byte ptr [EDID_BUF + 60]       # vertical total
+    movzx edx, byte ptr [EDID_BUF + 61]
+    and dx, 0x0F
+    shl edx, 8
+    or esi, edx
+    add esi, ecx
+    mov eax, ebx
+    mul esi                                   # pixels per frame (< 2^32 for any sane mode)
+    mov ebx, eax
+    test ebx, ebx
+    jz 3f
+    movzx eax, word ptr [EDID_BUF + 54]       # pixel clock in 10 kHz units
+    mov ecx, 10000000                         # -> millihertz = clock * 10000 * 1000 / frame
+    mul ecx
+    div ebx
+    mov dword ptr [MBI + 136], eax
+3:  mov dword ptr [MBI + 140], 0x44494445    # "EDID"
+9:  ret
 
 # Fills the Multiboot-style info struct: flags=1 (memory fields valid).
 get_memory:
@@ -516,6 +615,10 @@ sel:      .byte 0
 auto:     .byte 1
 secs:     .byte 0
 want_vbe: .byte 0
+want_w: .word 1024
+want_h: .word 768
+best_mode: .word 0
+best_area: .long 0
 sec_shift: .byte 0
 deadline: .word 0
 

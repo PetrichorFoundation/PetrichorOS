@@ -101,6 +101,7 @@ struct node {
     /* layout scratch */
     int mincw, maxcw;                              /* cached intrinsic widths (-1: unknown) */
     u8 bk;                                         /* 0 unknown, 1 block-level, 2 inline-level */
+    void *js;                                      /* its JavaScript object, once a script touched it */
 };
 
 /* ---- display list ---- */
@@ -115,11 +116,12 @@ struct cmd {
     int len;
     int img;                                       /* resource index + 1, or 0 */
     int radius;
+    struct node *node;                             /* element (or text node) that produced it: hit testing */
 };
 enum { CF_BOLD = 1, CF_ITALIC = 2, CF_MONO = 4, CF_UNDER = 8, CF_STRIKE = 16, CF_ALT = 32 };
 
 /* ---- resources the page wants ---- */
-enum { R_CSS, R_IMAGE };
+enum { R_CSS, R_IMAGE, R_SCRIPT };                 /* R_SCRIPT text is kept in res.css */
 enum { RS_WANT, RS_LOADING, RS_DONE, RS_FAILED };
 struct image {
     int w, h;
@@ -170,6 +172,8 @@ struct page {
     int dirty_style;                               /* a stylesheet arrived since the last restyle */
     u32 page_bg;                                   /* canvas background (body or html) */
     int text_only;
+    struct jsctx *js;                              /* the page's JavaScript state (js.c) */
+    u8 has_dyn_css;                                /* some rule uses :hover / :focus / :checked */
 };
 
 /* dom.c */
@@ -184,7 +188,22 @@ const char *attr_val(const struct node *n, const char *name);
 int add_resource(struct page *p, const char *url, int kind);
 int b64_decode(const char *s, int n, u8 *out);
 
+/* dom.c: changes made by scripts */
+struct node *dom_new_element(struct page *p, const char *tag);
+struct node *dom_new_text(struct page *p, const char *s, int len);
+void dom_remove(struct node *n);                                  /* detach from its parent */
+void dom_insert(struct page *p, struct node *parent, struct node *n, struct node *before);
+void dom_set_attr(struct page *p, struct node *n, const char *name, const char *val);   /* val NULL: remove */
+void dom_set_text(struct page *p, struct node *t, const char *s, int len);              /* a text node's text */
+void dom_set_html(struct page *p, struct node *parent, const char *html, int len);      /* innerHTML = */
+struct node *dom_clone(struct page *p, struct node *n, int deep);
+int dom_text(const struct node *n, char *out, int cap);          /* textContent; returns the full length */
+int dom_serialize(const struct node *n, char *out, int cap, int outer);
+const char *dom_tag_name(const struct node *n);                  /* lower case */
+
 /* css.c */
+int css_matches(struct page *p, struct node *n, const char *sel); /* 1 / 0, -1 for a selector it can't parse */
+extern struct node *css_hover, *css_focus;                       /* state for :hover and :focus */
 void css_restyle(struct page *p, int viewport_w);
 void css_free_rules(struct page *p);
 int css_parse_len(const char *s, int n, int font_px, struct len *out);
@@ -197,12 +216,27 @@ int glyph_adv(int ch, int px, int flags);           /* advance in 1/16 px */
 /* paint.c */
 void page_draw(struct page *p, struct rect view, int scroll, int hover_link);
 int page_link_at(struct page *p, int x, int y);     /* page coordinates; -1 if none */
+struct node *page_node_at(struct page *p, int x, int y);
 void glyph_flush(void);
 
 /* img.c */
 struct image *img_decode(const u8 *data, int len);
 const u32 *img_scaled(struct image *im, int w, int h);
 void img_free(struct image *im);
+
+/* js.c / jsdom.c: JavaScript */
+void js_page_start(struct page *p);
+void js_page_end(struct page *p);
+void js_run(struct page *p, const char *src, int len, const char *name);
+void js_loaded(struct page *p);                                   /* DOMContentLoaded + load */
+int js_event(struct page *p, struct node *target, const char *type, int key, int flags);  /* 1: default prevented */
+int js_timers(struct page *p);                                    /* runs due timers; ms to the next one, -1 none */
+const char *js_log(struct page *p);
+int js_dirty(struct page *p);                                     /* the DOM changed since the last call */
+int js_stopped(struct page *p);
+const char *js_take_nav(struct page *p);                          /* location.href = ...; NULL if none */
+const char *js_take_alert(struct page *p);
+struct node *js_focus(struct page *p);                            /* element focused by a script (or NULL) */
 
 /* from browser.c */
 int page_next_resource(struct page *p);             /* index of a resource still wanted, or -1 */

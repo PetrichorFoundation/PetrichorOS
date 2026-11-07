@@ -476,9 +476,10 @@ static void mmio_init(void)
     }
 }
 
-void *mmio_map(u32 phys, u32 size)
+void *mmio_map(u64 phys, u32 size)
 {
-    u32 off = phys & 0xFFF, base = phys & ~0xFFFu;
+    u32 off = phys & 0xFFF;
+    u64 base = phys & ~0xFFFull;
     u32 pages = (off + size + PAGE_SIZE - 1) / PAGE_SIZE;
     if (mmio_next + pages * PAGE_SIZE > MMIO_BASE + MMIO_SIZE)
         return NULL;

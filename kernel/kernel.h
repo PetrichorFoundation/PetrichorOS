@@ -76,7 +76,7 @@ struct inode {
     /* disk-backed (PFS) inodes */
     int pfs;
     u32 dino;
-    u32 dblk[12], iblk;
+    u32 dblk[12], iblk, i2blk;
     struct inode *pnext;
 };
 
@@ -129,6 +129,7 @@ struct bootinfo {
     u32 kimg, kimg_size;                         /* pristine copy of the boot image kernel, for the installer */
     u32 fb_addr, fb_pitch, fb_w, fb_h, fb_bpp;   /* VESA linear framebuffer, if the bootloader set one up */
     u32 rsdp;                                    /* ACPI RSDP address when the firmware loader supplied it (UEFI) */
+    u32 edid_w, edid_h, edid_mhz;                /* the monitor's preferred mode, read by the bootloader (0 = unknown) */
     u32 uefi;                                    /* started by the UEFI loader, not the BIOS bootloader */
     u32 nranges, range[16][2];                   /* usable RAM above 1 MiB, from the UEFI memory map (else empty) */
 };
@@ -203,6 +204,8 @@ int inode_dirent(struct inode *ip, u32 idx, struct dirent *de);
 #define BUS_IDE  0
 #define BUS_SATA 1
 #define BUS_NVME 2
+#define BUS_USB  3
+#define BUS_VIRTIO 4
 typedef int (*blk_rw_fn)(void *priv, u32 lba, u32 n, void *buf, int write);
 int storage_init(void);                          /* probe IDE, AHCI, NVMe; find the boot disk */
 int blk_register(const char *model, u32 sectors, int bus, blk_rw_fn rw, void *priv);
@@ -214,10 +217,15 @@ int blk_bus(int dev);
 int blk_read(int dev, u32 lba, u32 n, void *buf);
 int blk_write(int dev, u32 lba, u32 n, const void *buf);
 extern int boot_disk;
+extern int live_disk;                                            /* the install USB stick / disk we are running from, or -1 */
 extern u32 pfs_base_lba, pfs_sectors;                            /* index of the disk we booted from, or -1 */
 int ide_probe(void);
 int ahci_probe(void);
 int nvme_probe(void);
+int virtio_blk_probe(void);
+int usb_init(void);                                              /* xHCI: keyboards, mice, USB disks */
+void usb_tick(void);                                             /* timer tick: poll USB input */
+void kbd_scancode(u8 sc);                                        /* feed one PC (set 1) scancode */
 
 /* PCI (pci.c) and device memory (mem.c) */
 struct pcidev {
@@ -227,7 +235,7 @@ int pci_find_class(u32 class24, int index, struct pcidev *out);   /* class<<16 |
 u32 pci_cfg_read(const struct pcidev *d, u32 off);
 void pci_cfg_write(const struct pcidev *d, u32 off, u32 v);
 void pci_enable(const struct pcidev *d);                         /* memory space + bus mastering */
-void *mmio_map(u32 phys, u32 size);                              /* uncached kernel mapping of device memory */
+void *mmio_map(u64 phys, u32 size);                              /* uncached kernel mapping of device memory */
 void *kalloc_aligned(u32 size, u32 align);                       /* physically contiguous (identity-mapped heap) */
 
 /* pfs.c: on-disk filesystem */
@@ -260,6 +268,10 @@ void nic_poll(void);
 extern u8 nic_mac[6];
 extern int nic_irq_line;
 extern const char *nic_name;
+int rtl8168_init(void);
+int rtl8168_send(const u8 *frame, u32 len);
+void rtl8168_irq(void);
+void rtl8168_poll(void);
 int rtl8139_init(void);
 int rtl8139_send(const u8 *frame, u32 len);
 void rtl8139_irq(void);
@@ -351,6 +363,7 @@ int exec_into(struct proc *p, struct inode *ip, int argc, char **argv);
 
 /* acpi.c */
 void acpi_poweroff(void);
+void acpi_reset(void);
 
 /* syscall.c */
 int syscall_dispatch(struct regs *r);

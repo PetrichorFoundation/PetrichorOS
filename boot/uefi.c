@@ -124,6 +124,12 @@ typedef struct {
 static const GUID LOADED_IMAGE_GUID = {0x5B1B31A1, 0x9562, 0x11d2, {0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
 static const GUID FILE_SYSTEM_GUID = {0x964E5B22, 0x6459, 0x11D2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
 static const GUID GOP_GUID = {0x9042A9DE, 0x23DC, 0x4A38, {0x96, 0xFB, 0x7A, 0xDE, 0xD0, 0x80, 0x51, 0x6A}};
+static const GUID EDID_ACTIVE_GUID = {0xBD8C1056, 0x9F36, 0x44EC, {0x92, 0xA8, 0xA6, 0x33, 0x7F, 0x81, 0x79, 0x86}};
+static const GUID EDID_DISCOVERED_GUID = {0x1C0C34F6, 0xD380, 0x41FA, {0xA0, 0x49, 0x8A, 0xD0, 0x6C, 0x1A, 0x66, 0xAA}};
+typedef struct {
+    u32 size;
+    u8 *edid;
+} EDID_PROTO;
 static const GUID ACPI20_GUID = {0x8868E871, 0xE4F1, 0x11D3, {0xBC, 0x22, 0x00, 0x80, 0xC7, 0x3C, 0x88, 0x81}};
 static const GUID ACPI10_GUID = {0xEB9D2D30, 0x2D88, 0x11D3, {0x9A, 0x16, 0x00, 0x80, 0xC7, 0x3C, 0x88, 0x81}};
 
@@ -330,21 +336,54 @@ EFI_STATUS efi_main(void *image, SYSTEM_TABLE *st)
         memcpy(cmdline_buf + cl, tail, sizeof tail);
     }
 
-    /* graphics: 1024x768, BGR pixels (what the desktop draws) */
+    /* graphics: read the monitor's preferred resolution (EDID) and take the largest BGR mode that fits in it
+     * (1024x768 if the monitor doesn't say; never above 2560x1600) */
+    u32 want_w = 1024, want_h = 768, mon_w = 0, mon_h = 0, mon_mhz = 0;
+    {
+        EDID_PROTO *ep = NULL;
+        if (bs->LocateProtocol(&EDID_ACTIVE_GUID, NULL, (void **)&ep) != EFI_SUCCESS || !ep || !ep->size || !ep->edid)
+            if (bs->LocateProtocol(&EDID_DISCOVERED_GUID, NULL, (void **)&ep) != EFI_SUCCESS || !ep || !ep->size || !ep->edid)
+                ep = NULL;
+        if (ep && ep->size >= 128) {
+            const u8 *e = ep->edid;
+            u32 clk = e[54] | (e[55] << 8);
+            u32 hact = e[56] | ((e[58] & 0xF0) << 4), vact = e[59] | ((e[61] & 0xF0) << 4);
+            u32 htot = hact + (e[57] | ((e[58] & 0x0F) << 8)), vtot = vact + (e[60] | ((e[61] & 0x0F) << 8));
+            if (e[0] == 0 && e[1] == 0xFF && e[7] == 0 && clk && hact >= 640 && vact >= 480 && hact <= 8192 && vact <= 8192) {
+                mon_w = hact;
+                mon_h = vact;
+                if (htot && vtot)
+                    mon_mhz = (u32)((u64)clk * 10000000ull / ((u64)htot * vtot));
+                want_w = hact > 2560 ? 2560 : hact;
+                want_h = vact > 1600 ? 1600 : vact;
+            }
+        }
+    }
     GOP *gop;
     u32 fb_w = 0, fb_h = 0, fb_pitch = 0;
     u64 fb_base = 0;
     if (bs->LocateProtocol(&GOP_GUID, NULL, (void **)&gop) == EFI_SUCCESS) {
+        if (!mon_w) {                                       /* no EDID: the mode the firmware is already in is usually the panel's own */
+            GOP_INFO *cur = gop->mode->info;
+            if (cur->hres >= 1024 && cur->vres >= 768 && cur->hres <= 2560 && cur->vres <= 1600) {
+                want_w = cur->hres;
+                want_h = cur->vres;
+            }
+        }
+        u32 best = 0, best_area = 0;
         for (u32 i = 0; i < gop->mode->max_mode; i++) {
             GOP_INFO *gi;
             UINTN isz;
             if (gop->QueryMode(gop, i, &isz, &gi) != EFI_SUCCESS)
                 continue;
-            if (gi->hres == 1024 && gi->vres == 768 && gi->format == 1) {
-                gop->SetMode(gop, i);
-                break;
+            u32 area = gi->hres * gi->vres;
+            if (gi->format == 1 && gi->hres <= want_w && gi->vres <= want_h && area > best_area) {
+                best = i;
+                best_area = area;
             }
         }
+        if (best_area && best != gop->mode->mode)
+            gop->SetMode(gop, best);
         GOP_INFO *gi = gop->mode->info;
         if (gi->format <= 1) {
             fb_w = gi->hres;
@@ -416,6 +455,12 @@ exited:
         mbi[0] &= ~(1u << 12);
     }
     mbi[30] = (u32)rsdp;
+    if (mon_w) {
+        mbi[32] = mon_w;
+        mbi[33] = mon_h;
+        mbi[34] = mon_mhz;
+        mbi[35] = 0x44494445;                                   /* "EDID" */
+    }
 
     ((void (*)(u64, u64))(u64)entry64)(MB_MAGIC_LOADER, (u64)mbi);
     for (;;)
