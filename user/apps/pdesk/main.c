@@ -9,6 +9,8 @@
  * Exit status tells init what to do next: 0 = log out (show the desktop
  * again), 10 = drop to the text console. */
 #include "desk.h"
+#include "host.h"
+#include "img.h"
 
 #define MAXWIN 12
 
@@ -56,13 +58,15 @@ int g_wall, g_accent_idx;
 static const struct {
     const char *name;
     u32 top, bottom;
-    int rain, stars;
+    int rain, stars, swoosh;
 } walls[NWALL] = {
-    {"Rain", RGB(0x0c, 0x22, 0x3a), RGB(0x1c, 0x5a, 0x6a), 1, 0},
-    {"Forest", RGB(0x08, 0x1c, 0x14), RGB(0x2a, 0x5e, 0x3a), 1, 0},
-    {"Dusk", RGB(0x24, 0x18, 0x48), RGB(0xd0, 0x78, 0x4c), 0, 0},
-    {"Slate", RGB(0x26, 0x2c, 0x34), RGB(0x58, 0x62, 0x6e), 0, 0},
-    {"Midnight", RGB(0x02, 0x04, 0x10), RGB(0x16, 0x20, 0x44), 0, 1},
+    {"Rain", RGB(0x0c, 0x22, 0x3a), RGB(0x1c, 0x5a, 0x6a), 1, 0, 0},
+    {"Forest", RGB(0x08, 0x1c, 0x14), RGB(0x2a, 0x5e, 0x3a), 1, 0, 0},
+    {"Dusk", RGB(0x24, 0x18, 0x48), RGB(0xd0, 0x78, 0x4c), 0, 0, 0},
+    {"Slate", RGB(0x26, 0x2c, 0x34), RGB(0x58, 0x62, 0x6e), 0, 0, 0},
+    {"Midnight", RGB(0x02, 0x04, 0x10), RGB(0x16, 0x20, 0x44), 0, 1, 0},
+    {"Aqua", RGB(0x0a, 0x3c, 0x8c), RGB(0x6c, 0xc8, 0xf0), 0, 0, 1},
+    {"Aurora", RGB(0x04, 0x1a, 0x2c), RGB(0x10, 0x6a, 0x5a), 0, 1, 2},
 };
 
 static const u32 accents[NACCENT] = {
@@ -83,13 +87,15 @@ int g_blank_min = 10;
 static int blanked;
 static u32 last_input;
 
+char g_wallpic[128];
+
 static void theme_load(void)
 {
     g_wall = 0;
     g_accent_idx = 0;
     int fd = open(THEME_CONF, O_RDONLY);
     if (fd >= 0) {
-        char buf[128];
+        char buf[320];
         int n = read(fd, buf, sizeof buf - 1);
         close(fd);
         buf[n > 0 ? n : 0] = 0;
@@ -109,17 +115,87 @@ static void theme_load(void)
         if (p) g_fps = atoi(p + 4);
         p = strstr(buf, "blank=");
         if (p) g_blank_min = atoi(p + 6);
+        p = strstr(buf, "pic=");
+        if (p) {
+            int i = 0;
+            for (p += 4; *p && *p != '\n' && i < (int)sizeof g_wallpic - 1; p++) g_wallpic[i++] = *p;
+            g_wallpic[i] = 0;
+        }
     }
     if (g_wall < 0 || g_wall >= NWALL) g_wall = 0;
     if (g_accent_idx < 0 || g_accent_idx >= NACCENT) g_accent_idx = 0;
     g_accent = accents[g_accent_idx];
 }
 
+/* A picture wallpaper, scaled to cover the screen (cropping the overflow).  Returns 0 if it couldn't be loaded. */
+static int draw_picture(const char *path)
+{
+    struct stat st;
+    if (!path[0] || stat(path, &st) < 0 || st.size <= 0 || st.size > 24 * 1024 * 1024)
+        return 0;
+    u8 *data = malloc(st.size);
+    int fd = data ? open(path, O_RDONLY) : -1, got = 0, r;
+    if (fd < 0) { free(data); return 0; }
+    while (got < (int)st.size && (r = read(fd, data + got, st.size - got)) > 0) got += r;
+    close(fd);
+    struct image *im = got == (int)st.size ? img_decode(data, got) : NULL;
+    free(data);
+    if (!im)
+        return 0;
+    int dw = SCREEN_W, dh = (int)((long)im->h * SCREEN_W / im->w);
+    if (dh < SCREEN_H) {
+        dh = SCREEN_H;
+        dw = (int)((long)im->w * SCREEN_H / im->h);
+    }
+    const u32 *px = img_scaled(im, dw, dh);
+    if (px) {
+        gfx_fill(0, 0, SCREEN_W, SCREEN_H, 0);
+        gfx_blit_argb(px, (SCREEN_W - dw) / 2, (SCREEN_H - dh) / 2, dw, dh);
+    }
+    img_free(im);
+    return px != NULL;
+}
+
+/* Y2K-style light ribbons: layered translucent sine bands with a bright edge. */
+static void draw_swooshes(int kind)
+{
+    static const int sin64[65] = {0, 6, 13, 19, 25, 31, 37, 43, 49, 55, 60, 66, 71, 76, 81, 85, 90, 94, 98, 102, 106,
+                                  109, 112, 115, 117, 120, 122, 123, 125, 126, 127, 127, 128, 127, 127, 126, 125, 123,
+                                  122, 120, 117, 115, 112, 109, 106, 102, 98, 94, 90, 85, 81, 76, 71, 66, 60, 55, 49, 43,
+                                  37, 31, 25, 19, 13, 6, 0};
+    for (int band = 0; band < 5; band++) {
+        int base = SCREEN_H * (40 + band * 9) / 100, amp = SCREEN_H / (5 + band), thick = 26 + band * 22;
+        int phase = band * 37, period = SCREEN_W + band * 260;
+        u32 col = kind == 1 ? (band & 1 ? RGB(0xd8, 0xf4, 0xff) : RGB(0x9c, 0xe0, 0xff))
+                            : (band & 1 ? RGB(0x60, 0xf0, 0xb0) : RGB(0x70, 0xa8, 0xff));
+        for (int x = 0; x < SCREEN_W; x++) {
+            int t8 = ((x * 1024 / period) + phase * 8) % 1024;           /* one full sine over 128 steps, */
+            int t = t8 >> 3, f = t8 & 7, t2 = (t + 1) & 127;             /* interpolated in eighths */
+            int s0 = t < 64 ? sin64[t] : -sin64[t - 64], s1 = t2 < 64 ? sin64[t2] : -sin64[t2 - 64];
+            int s = s0 + (s1 - s0) * f / 8;
+            int y = base - s * amp / 128 - (x * SCREEN_H / 6) / SCREEN_W;
+            for (int k = 0; k < thick; k++) {
+                int py = y + k;
+                if (py < 0 || py >= SCREEN_H) continue;
+                int a = k < 3 ? 70 - k * 12 : (thick - k) * 28 / thick + 4;     /* bright lip, then a soft fade */
+                u32 *p = wall + py * SCREEN_W + x;
+                *p = gfx_mix(*p, col, a);
+            }
+        }
+    }
+}
+
 static void render_wallpaper(void)
 {
     gfx_set_target(wall, SCREEN_W, SCREEN_H);
     gfx_set_clip(0, 0, SCREEN_W, SCREEN_H);
+    if (g_wallpic[0] && draw_picture(g_wallpic)) {
+        gfx_set_target(back, SCREEN_W, SCREEN_H);
+        return;
+    }
     gfx_vgrad(0, 0, SCREEN_W, SCREEN_H, walls[g_wall].top, walls[g_wall].bottom);
+    if (walls[g_wall].swoosh)
+        draw_swooshes(walls[g_wall].swoosh);
     u32 seed = 0x2545F491;
     if (walls[g_wall].rain) {
         for (int i = 0; i < 260; i++) {
@@ -180,9 +256,9 @@ static void theme_save(void)
     diskinfo(&di);
     if (di.mounted) {
         mkdir("/disk/etc");
-        char buf[128];
-        int n = snprintf(buf, sizeof buf, "wall=%d\naccent=%d\nanim=%d\nres=%dx%d\nfps=%d\nblank=%d\n", g_wall,
-                         g_accent_idx, g_animations, g_res_w, g_res_h, g_fps, g_blank_min);
+        char buf[320];
+        int n = snprintf(buf, sizeof buf, "wall=%d\naccent=%d\nanim=%d\nres=%dx%d\nfps=%d\nblank=%d\npic=%s\n", g_wall,
+                         g_accent_idx, g_animations, g_res_w, g_res_h, g_fps, g_blank_min, g_wallpic);
         int fd = open(THEME_CONF, O_WRONLY | O_CREAT | O_TRUNC);
         if (fd >= 0) {
             write(fd, buf, n);
@@ -191,8 +267,28 @@ static void theme_save(void)
     }
 }
 
+int wallpaper_set_picture(const char *path)
+{
+    char old[sizeof g_wallpic];
+    safestrcpy(old, g_wallpic, sizeof old);
+    safestrcpy(g_wallpic, path, sizeof g_wallpic);
+    gfx_set_target(wall, SCREEN_W, SCREEN_H);
+    gfx_set_clip(0, 0, SCREEN_W, SCREEN_H);
+    int ok = draw_picture(g_wallpic);
+    gfx_set_target(back, SCREEN_W, SCREEN_H);
+    if (!ok) {
+        safestrcpy(g_wallpic, old, sizeof g_wallpic);
+        return -1;
+    }
+    invalidate(0, 0, SCREEN_W, SCREEN_H);
+    theme_save();
+    return 0;
+}
+
 void theme_set(int wall_idx, int accent_idx)
 {
+    if (wall_idx != g_wall)
+        g_wallpic[0] = 0;                       /* picking a built-in wallpaper replaces the picture */
     g_wall = wall_idx;
     g_accent_idx = accent_idx;
     g_accent = accents[accent_idx];
@@ -477,9 +573,14 @@ static void activate(struct win *w)
 
 static void title_button(int x, int y, int kind, int active)
 {
-    gfx_vgrad(x, y, 18, 16, active ? gfx_mix(RGB(0x70, 0x84, 0x98), g_accent, 90) : RGB(0xb4, 0xbc, 0xc4),
-              active ? gfx_mix(RGB(0x40, 0x56, 0x6c), g_accent, 90) : RGB(0x9a, 0xa4, 0xae));
-    gfx_frame(x, y, 18, 16, active ? RGB(0x24, 0x34, 0x46) : RGB(0x70, 0x7a, 0x84));
+    /* glossy gel buttons: a dark rim, the colored body, a bright upper reflection and a glow at the bottom */
+    u32 body = kind == 2 ? RGB(0xd2, 0x3c, 0x2c) : gfx_mix(RGB(0x30, 0x68, 0xb0), g_accent, 110);
+    if (!active)
+        body = gfx_mix(body, RGB(0xa8, 0xb4, 0xc0), 170);
+    gfx_round_rect(x, y, 18, 16, 5, 0xFF000000 | gfx_mix(body, 0, 110), 0);
+    gfx_round_rect(x + 1, y + 1, 16, 14, 4, 0xFF000000 | body, 0);
+    gfx_round_rect(x + 3, y + 2, 12, 6, 3, 0x8CFFFFFF, 0);
+    gfx_round_rect(x + 4, y + 10, 10, 4, 2, 0x30FFFFFF, 0);
     u32 c = C_WHITE;
     if (kind == 0)
         gfx_fill(x + 5, y + 10, 8, 2, c);                         /* minimize */
@@ -497,9 +598,14 @@ static void draw_window(struct win *w, struct rect damage_clip)
     int act = w == focus;
     gfx_blend(w->x + 4, w->y + 5, w->w, w->h, 0, 24);            /* soft shadow */
     gfx_blend(w->x + 2, w->y + 3, w->w, w->h, 0, 24);
-    gfx_fill(w->x, w->y, w->w, w->h, C_WIN_EDGE);
-    u32 ta = gfx_mix(RGB(0x58, 0x6a, 0x7c), g_accent, 96), tb = gfx_mix(RGB(0x34, 0x44, 0x56), g_accent, 96);
-    gfx_vgrad(w->x + 1, w->y + 1, w->w - 2, TITLE_H - 1, act ? ta : C_TITLE_IA, act ? tb : C_TITLE_IB);
+    /* Glass: the title bar and edges are tinted, see-through panes with a glossy highlight on the top half. */
+    u32 tint = act ? gfx_mix(RGB(0x1c, 0x4c, 0x88), g_accent, 100) : RGB(0x7c, 0x8e, 0xa2);
+    gfx_blend(w->x, w->y, w->w, TITLE_H, tint, act ? 170 : 130);
+    gfx_blend(w->x + 1, w->y + 1, w->w - 2, TITLE_H / 2 - 1, C_WHITE, act ? 64 : 44);
+    gfx_blend(w->x + 1, w->y + 1, w->w - 2, 1, C_WHITE, 150);
+    gfx_blend(w->x, w->y + TITLE_H - 1, w->w, 1, 0, 90);
+    gfx_frame(w->x, w->y, w->w, w->h, act ? gfx_mix(tint, 0, 140) : RGB(0x50, 0x5c, 0x68));
+    gfx_fill(w->x + 1, w->y + TITLE_H, w->w - 2, w->h - TITLE_H - 1, C_WIN_EDGE);
 
     char t[64];
     int maxc = (w->w - 110) / 8;
@@ -845,10 +951,17 @@ static void sample_tray(void)
 
 static void draw_panel(void)
 {
-    gfx_vgrad(0, 0, SCREEN_W, PANEL_H, RGB(0x30, 0x39, 0x43), C_PANEL);
-    gfx_hline(0, PANEL_H - 1, SCREEN_W, RGB(0x10, 0x14, 0x18));
+    /* a smoked-glass bar: the wallpaper shows through, with a gloss on the upper half */
+    gfx_blend(0, 0, SCREEN_W, PANEL_H, RGB(0x08, 0x16, 0x28), 175);
+    gfx_blend(0, 0, SCREEN_W, PANEL_H / 2, C_WHITE, 30);
+    gfx_blend(0, 0, SCREEN_W, 1, C_WHITE, 80);
+    gfx_hline(0, PANEL_H - 1, SCREEN_W, RGB(0x04, 0x0a, 0x12));
 
-    gfx_fill(0, 0, APPBTN_W, PANEL_H - 1, open_popup == &app_menu ? g_accent : C_PANEL_HI);
+    /* the Applications button: a gel pill in the accent color */
+    u32 pill = open_popup == &app_menu ? gfx_mix(g_accent, C_WHITE, 60) : g_accent;
+    gfx_round_rect(2, 2, APPBTN_W - 4, PANEL_H - 5, 11, 0xFF000000 | gfx_mix(pill, 0, 120), 0);
+    gfx_round_rect(3, 3, APPBTN_W - 6, PANEL_H - 7, 10, 0xFF000000 | pill, 0);
+    gfx_round_rect(6, 4, APPBTN_W - 12, (PANEL_H - 7) / 2, 6, 0x70FFFFFF, 0);
     icon_draw(ICON_APPS, 6, 5, 18);
     gfx_text(30, 6, "Applications", C_WHITE);
 
@@ -861,9 +974,10 @@ static void draw_panel(void)
             continue;
         struct rect r = taskbar_rect(idx++, count);
         int act = &wins[i] == focus && !wins[i].minimized;
-        gfx_fill(r.x, r.y, r.w, r.h, act ? RGB(0x56, 0x6c, 0x84) : C_PANEL_HI);
-        if (act)
-            gfx_fill(r.x, r.y + r.h - 2, r.w, 2, g_accent);
+        u32 tb = act ? gfx_mix(g_accent, RGB(0x10, 0x30, 0x60), 90) : RGB(0x40, 0x58, 0x74);
+        gfx_round_rect(r.x, r.y, r.w, r.h, 5, (act ? 0xD0000000u : 0x70000000u) | tb, 0);
+        gfx_round_rect(r.x + 2, r.y + 1, r.w - 4, r.h / 2, 4, act ? 0x60FFFFFF : 0x28FFFFFF, 0);
+        gfx_round_rect(r.x, r.y, r.w, r.h, 5, act ? 0x90FFFFFF : 0x40FFFFFF, 1);
         char t[32];
         int maxc = (r.w - 12) / 8;
         safestrcpy(t, wins[i].title, sizeof t);
@@ -921,20 +1035,22 @@ static int dock_lift_px(int i);
 static void draw_dock(void)
 {
     struct rect d = dock_rect();
-    gfx_blend(d.x, d.y, d.w, d.h, RGB(0x10, 0x1c, 0x28), 185);
-    gfx_frame(d.x, d.y, d.w, d.h, RGB(0x50, 0x62, 0x74));
+    /* a glass shelf: translucent body, a gloss band on top, a bright rim */
+    gfx_round_rect(d.x, d.y, d.w, d.h, 12, 0x9C0C2038, 0);
+    gfx_round_rect(d.x + 3, d.y + 2, d.w - 6, d.h / 2 - 2, 10, 0x2EFFFFFF, 0);
+    gfx_round_rect(d.x, d.y, d.w, d.h, 12, 0x8CC8E8FF, 1);
     for (int i = 0; i < NDOCK; i++) {
         struct rect r = dock_icon_rect(i);
         if (dock_hover == i)
-            gfx_blend(r.x - 2, r.y - 2, r.w + 4, r.h + 4, C_WHITE, 55);
+            gfx_round_rect(r.x - 2, r.y - 2, r.w + 4, r.h + 4, 9, 0x50FFFFFF, 0);
         icon_draw(dock_items[i].icon, r.x + 6, r.y + 4 - dock_lift_px(i), 32);
     }
     if (dock_hover >= 0) {
         struct rect r = dock_icon_rect(dock_hover);
         int tw = gfx_text_width(dock_items[dock_hover].label) + 16;
         int tx = r.x + r.w / 2 - tw / 2;
-        gfx_fill(tx, d.y - 26, tw, 22, RGB(0x14, 0x1a, 0x20));
-        gfx_frame(tx, d.y - 26, tw, 22, RGB(0x50, 0x62, 0x74));
+        gfx_round_rect(tx, d.y - 26, tw, 22, 6, 0xE0102438, 0);
+        gfx_round_rect(tx, d.y - 26, tw, 22, 6, 0x90C8E8FF, 1);
         gfx_text(tx + 8, d.y - 23, dock_items[dock_hover].label, C_WHITE);
     }
 }
@@ -1744,6 +1860,9 @@ void blank_set(int minutes)
 static char *clip;
 static int clip_len;
 
+/* Kept in a file too, so separate programs (the browser package) share it. */
+#define CLIP_FILE "/tmp/clipboard"
+
 void clip_set(const char *text, int len)
 {
     char *n = malloc(len + 1);
@@ -1754,10 +1873,30 @@ void clip_set(const char *text, int len)
     free(clip);
     clip = n;
     clip_len = len;
+    int fd = open(CLIP_FILE, O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd >= 0) {
+        write(fd, text, len);
+        close(fd);
+    }
 }
 
 const char *clip_get(int *len)
 {
+    struct stat st;
+    if (stat(CLIP_FILE, &st) == 0 && st.size > 0 && st.size < 4 * 1024 * 1024) {   /* someone else may have copied */
+        char *n = malloc(st.size + 1);
+        int fd = open(CLIP_FILE, O_RDONLY);
+        int got = fd >= 0 && n ? read(fd, n, st.size) : -1;
+        if (fd >= 0) close(fd);
+        if (got > 0) {
+            n[got] = 0;
+            free(clip);
+            clip = n;
+            clip_len = got;
+        } else {
+            free(n);
+        }
+    }
     if (len)
         *len = clip_len;
     return clip_len ? clip : NULL;
@@ -1960,6 +2099,8 @@ int main(int argc, char **argv)
             } else if (w->app->pollfd && n < 64 && w->app->pollfd(w, &pf[n]))
                 owner[n++] = w;
         }
+        int first_host = n;                                /* programs the desktop launched (host.c) */
+        n += hosts_pollfds(&pf[n], 64 - n);
         int wait = anim_active() ? frame_wait() : 100;
         for (int i = 0; i < nz; i++) {                     /* apps with timers (web pages running scripts) */
             struct win *w = zorder[i];
@@ -1994,9 +2135,12 @@ int main(int argc, char **argv)
                         handle_key(&ev[i]);
                 }
             }
-            for (int i = 1; i < n; i++)
+            for (int i = 1; i < first_host; i++)
                 if (pf[i].revents && owner[i]->used && owner[i]->app->fdready)
                     owner[i]->app->fdready(owner[i], &pf[i]);
+            for (int i = first_host; i < n; i++)
+                if (pf[i].revents)
+                    hosts_fdready(&pf[i]);
         }
 
         u32 now = uptime();

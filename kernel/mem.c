@@ -231,6 +231,19 @@ void vmm_unmap(u64 *pd, u32 va)
     __asm__ volatile("invlpg (%0)" : : "r"((uptr)va) : "memory");
 }
 
+/* Makes a mapped user page writable or read-only (mprotect); -1 if nothing is mapped there. */
+int vmm_set_rw(u64 *pd, u32 va, int rw)
+{
+    u64 *pt = walk(pd, va, 0);
+    if (!pt || !(pt[IDX_PT(va)] & PTE_P))
+        return -1;
+    if (rw)
+        pt[IDX_PT(va)] |= PTE_RW;
+    else
+        pt[IDX_PT(va)] &= ~PTE_RW;
+    return 0;
+}
+
 /* Maps a fresh zeroed user page at va unless one is already there. */
 int vmm_alloc_page(u64 *pd, u32 va)
 {

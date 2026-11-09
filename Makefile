@@ -21,11 +21,11 @@ KASM := kernel/boot.S kernel/isr.S kernel/initrd.S
 KOBJ := $(patsubst %.c,$B/%.o,$(KSRC)) $(patsubst %.S,$B/%.o,$(KASM))
 
 # ---- userland ----
-ULIB := $B/user/lib/ulib.o $B/user/lib/net.o $B/user/lib/http.o $B/lib/sha256.o $B/user/lib/usys.o $B/lib/string.o $B/lib/format.o
+ULIB := $B/user/lib/ulib.o $B/user/lib/pthread.o $B/user/lib/cxxrt.o $B/user/lib/net.o $B/user/lib/http.o $B/lib/sha256.o $B/user/lib/usys.o $B/lib/string.o $B/lib/format.o
 # TLS (HTTPS) is linked only into the programs that talk to web servers.
 TLSLIB := $(addprefix $B/user/lib/,https.o $(addprefix tls/,hash.o gcm.o bn.o ec.o rsa.o x509.o tls.o))
 TLSBINS := fetch wget ppm
-UBIN := $(patsubst user/bin/%.c,%,$(wildcard user/bin/*.c))
+UBIN := $(patsubst user/bin/%.c,%,$(wildcard user/bin/*.c)) $(patsubst user/bin/%.cpp,%,$(wildcard user/bin/*.cpp))
 UEXE := $(addprefix $B/user/out/,$(UBIN))
 
 # Multi-file programs live in user/apps/<name>/*.c and may use the graphics library.
@@ -52,13 +52,16 @@ $B/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(if $(filter user/%,$<),$(UCFLAGS),$(KCFLAGS)) -c $< -o $@
 
+# C++ (user programs only): no exceptions or RTTI yet; the runtime is user/lib/cxxrt.c.  Not -ffreestanding:
+# in freestanding C++ main() is an ordinary (mangled) function.
+UCXXFLAGS := $(filter-out -std=gnu11 -ffreestanding,$(UCFLAGS)) -fno-builtin -std=gnu++17 -fno-exceptions -fno-rtti -nostdinc++
+$B/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CC) -x c++ $(UCXXFLAGS) -c $< -o $@
+
 $B/%.o: %.S
 	@mkdir -p $(dir $@)
 	$(CC) $(ASFLAGS) -c $< -o $@
-
-# The JavaScript engine computes with doubles: SSE on for its files only (nothing else in the desktop passes
-# floating-point values across a call, and the kernel saves SSE state per process).
-$B/user/apps/pdesk/js.o $B/user/apps/pdesk/jsdom.o: UCFLAGS += -msse2
 
 $B/user/out/%: $B/user/bin/%.o $(ULIB) user/user.ld
 	@mkdir -p $(dir $@)
@@ -70,24 +73,17 @@ $B/user/out/pinstall: $B/lib/efiimg.o
 # Packages live in their own repository (github.com/krspybacon/Petrichor-Packages), whose Makefile calls this
 # rule once per package directory:
 #   make package PKGDIR=/abs/path/packages/<name> OUT=/abs/path/to/the/repo
-# <name>/package holds VERSION, DEPS, DESC; src/*.c -> bin/<prog>; files/ is copied as-is.
+# The layout of a package directory is described in tools/buildpkg.sh.
 $B/mkppk: tools/mkppk.c lib/sha256.c lib/sha256.h
 	@mkdir -p $B
 	$(HOSTCC) -O2 -Ilib -o $@ tools/mkppk.c lib/sha256.c
 
 .PHONY: package
-package: $B/mkppk $(ULIB) user/user.ld
+package: $B/mkppk $(ULIB) $B/user/lib/gfx.o user/user.ld
 	@test -n "$(PKGDIR)" -a -n "$(OUT)" || { echo "usage: make package PKGDIR=<dir> OUT=<repo dir>"; exit 1; }
 	@test -f "$(PKGDIR)/package" || { echo "$(PKGDIR)/package is missing"; exit 1; }
-	@set -e; p=$$(basename "$(PKGDIR)"); st=$B/pkgstage/$$p; mkdir -p "$$st" $B/pkgobj; \
-	for s in "$(PKGDIR)"/src/*.c; do \
-	  [ -f "$$s" ] || continue; n=$$(basename "$$s" .c); mkdir -p "$$st/bin"; \
-	  echo "  CC  $$p/$$n"; \
-	  $(CC) $(UCFLAGS) -c "$$s" -o $B/pkgobj/$$p-$$n.o; \
-	  $(LD) $(LDFLAGS) -T user/user.ld -o "$$st/bin/$$n" $B/pkgobj/$$p-$$n.o $(ULIB); \
-	done; \
-	if [ -d "$(PKGDIR)/files" ]; then cp -R "$(PKGDIR)/files/." "$$st/"; fi; \
-	( . "$(PKGDIR)/package"; $B/mkppk "$(OUT)" "$$st" "$$p" "$$VERSION" "$$DEPS" "$$DESC" )
+	@CC="$(CC)" UCFLAGS="$(UCFLAGS)" LD="$(LD)" LDFLAGS="$(LDFLAGS)" ULIB="$(ULIB)" B="$B" MKPPK="$B/mkppk" \
+	  sh tools/buildpkg.sh "$(PKGDIR)" "$(OUT)"
 
 # ---- bootloader and disk image ----
 $B/boot/%.bin: boot/%.S boot/%.ld

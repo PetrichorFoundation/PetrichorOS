@@ -177,14 +177,14 @@ XFCE-style desktop, written from scratch on top of the framebuffer and input dev
 - appearance: five wallpapers and six accent colors, saved in `/disk/etc/pdesk.conf`; animations (windows open,
   close, minimize and restore by scaling and fading a snapshot, menus unroll, the dock lifts hovered icons and
   bounces launching ones, notifications slide in) that Settings can turn off
-- apps: **Web Browser** (below), **Terminal** (runs `sh` over pipes, ANSI colors, wheel/PgUp scrollback, `^C`/`^D`),
+- apps: **Web Browser** (a package: see "The browser is a package" below), **Terminal** (runs `sh` over pipes, ANSI colors, wheel/PgUp scrollback, `^C`/`^D`),
   **File Manager**, **Text Editor**, **System Monitor**, **Software** (a front-end for `ppm`:
   browse, install, remove, upgrade), **Settings** (appearance, startup mode, system info,
   shortcuts), **Run Program**, **Install Petrichor** (wizard, shown when a second disk is attached),
   and About
 - needs QEMU's default VGA (`-vga std`); other graphics hardware isn't supported yet
 
-**Web browser** (`user/apps/pdesk/`: `browser.c`, plus the page engine `dom.c css.c layout.c paint.c img.c`;
+**Web browser** (now the `browser` package in Petrichor-Packages: `browser.c`, plus the page engine `dom.c css.c layout.c paint.c img.c`;
 `fetch` does the downloading). Opens `http://` and `https://` pages (a padlock marks a verified connection) and
 local `file://` pages. A page and its stylesheets and images load in background `fetch` processes (three at a
 time), so the desktop never freezes, and the page re-renders as things arrive. The engine is written from scratch:
@@ -204,9 +204,9 @@ time), so the desktop never freezes, and the page re-renders as things arrive. T
 - **Images**: PNG (all color types, interlaced), JPEG (baseline and progressive) and GIF decoders, box-filter scaled.
 - **Text**: the 8x16 bitmap font is rendered at any size with per-glyph proportional advances, bold and italic.
 
-Not supported: JavaScript (so no menus, lazy-loaded images or single-page apps), `position: absolute/fixed`
+Not supported: the parts of JavaScript listed under "JavaScript and interactive pages", `position: absolute/fixed`
 elements (they are left out), SVG, WebP/AVIF, web fonts (everything uses the built-in font), CSS animations,
-shadows, `::before/::after`, and form submission. It was tested on local pages and on real sites (Wikipedia,
+shadows, `::before/::after`, and POST form submission. It was tested on local pages and on real sites (Wikipedia,
 Hacker News, NPR, example.com).
 
 **HTTPS** (`user/lib/tls/`). A TLS 1.2 client written from scratch, with no third-party code: SHA-2,
@@ -335,7 +335,7 @@ package signatures beyond SHA-256 in the index (the repository can now be served
 signals (`kill` terminates) and no copy-on-write `fork`. The bitmap font is the standard VGA text-mode
 font as rendered by QEMU's VGA BIOS (LGPL-licensed); swap in your own if you need different terms.
 
-Natural next steps: TLS 1.3, JavaScript, SVG/WebP and positioned elements for the browser, UEFI boot (and GPT), USB hubs/hot-plug and EHCI, more NICs (Wi-Fi, USB), AHCI/NVMe interrupts and multiple queues, real mode-setting GPU drivers, partitioning and
+Natural next steps: TLS 1.3, regular expressions and promises for JavaScript, SVG/WebP and positioned elements for the browser, UEFI boot (and GPT), USB hubs/hot-plug and EHCI, more NICs (Wi-Fi, USB), AHCI/NVMe interrupts and multiple queues, real mode-setting GPU drivers, partitioning and
 dual-boot in the installer, a window-server protocol, DHCP and `listen`/`accept`, a journal, signed
 packages, real signals, a 64-bit port.
 
@@ -378,3 +378,42 @@ holds the install ISO is recognised and can never be chosen as an install target
   Not supported: battery level, sleep, brightness keys, real DPMS monitor standby (all need an ACPI AML interpreter
   or GPU driver).
 - **Storage:** files up to 4 GiB and data partitions up to 16 GiB (was 4 MiB and 128 MiB).
+
+## JavaScript and interactive pages
+
+The browser runs JavaScript with its own interpreter (`js.c` for the language, `jsdom.c` for the DOM, in the
+browser package). `file:///disk/share/browser/jsdemo.html` (linked from the browser's home page) shows it: a counter kept in localStorage, a
+to-do list built with a form, a clock on a timer, and a tic-tac-toe game written as a class.
+
+- **Language:** var/let/const, functions, arrow functions, closures, default/rest parameters, destructuring,
+  spread, template literals, classes (extends, super, getters/setters, fields), prototypes and `new`, try/catch,
+  for-in/of, switch, `?.`, `??`, and Object, Array, String, Number, Math, JSON, Map, Set, Date, console.
+- **DOM:** getElementById/querySelector(All), createElement, appendChild/insertBefore/remove, textContent,
+  innerHTML, attributes, classList, style, dataset, addEventListener and `onclick=` handlers with bubbling,
+  preventDefault/stopPropagation, setTimeout/setInterval/requestAnimationFrame, alert, location, and
+  localStorage (saved per site under `/disk/etc/web`).
+- **Interaction:** clicks reach page elements; text fields and text areas take typing (with a caret and paste);
+  checkboxes, radio buttons, labels, buttons and form submission (GET) work; the page gets keydown, input,
+  change, submit, focus and blur events. CSS `:hover`, `:focus` and `:checked` are applied.
+- **Not supported:** regular expressions (a regex literal is treated as a plain substring pattern), promises,
+  async/await (async functions run synchronously), fetch/XMLHttpRequest, generators, modules, canvas, and POST
+  forms. Big web apps that depend on those will not work. Each page's scripts are stopped if they run for too
+  long or use more than 32 MiB; there is no garbage collector, the memory is released when you leave the page.
+
+## The browser is a package
+
+Petrichor ships without a web browser. Install it with **Software** (or `ppm install browser`); the dock's Web
+Browser button and opening an `.html` file in Files say so and open Software when it is missing. The package
+(sources in Petrichor-Packages `packages/browser/`) is the same engine as before, running as its own program, parses HTML with hubbub, NetSurf's HTML5 parser, and styles pages with NetSurf's libcss together with its own CSS
+engine (which still handles var(), grid, gradients and rounded corners). Text uses real TrueType fonts (DejaVu, rendered with stb_truetype). User-space `malloc` now returns 16-byte
+aligned memory, as SSE-compiled code (such as libcss) expects.
+
+Separate graphical programs work like this: the desktop gives them a window through the window protocol
+(`include/winproto.h`) on file descriptors 3 and 4, and the window's pixels live in **shared memory** (a new
+`shm()` system call, `kernel/shm.c`), so the program draws directly into a buffer the desktop shows; only "this
+part changed" messages and input events travel through the pipes. Windows can be resized and maximized. The
+desktop starts such programs itself (`user/apps/pdesk/host.c`), and programs started from a desktop terminal
+can open them too. The clipboard is shared through `/tmp/clipboard`.
+
+Packages can now be multi-file programs (`src/<program>/*.c`) and set `CFLAGS` and `LIBS` (for example `gfx`)
+in their `package` file.

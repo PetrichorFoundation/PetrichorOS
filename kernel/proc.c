@@ -18,9 +18,23 @@ void proc_init(void)
     safestrcpy(cur->name, "idle", sizeof cur->name);
 }
 
+/* Finished threads need no wait(): their slots are freed here (never the running one, whose stack is in use). */
+static void reap_threads(void)
+{
+    for (int i = 1; i < NPROC; i++) {
+        struct proc *p = &ptable[i];
+        if (p->state == PS_ZOMBIE && p->thread && p != cur) {
+            kfree(p->kstack);
+            p->kstack = NULL;
+            p->state = PS_UNUSED;
+        }
+    }
+}
+
 /* Reserves a slot and prepares a kernel stack that "returns" into trapret. */
 static struct proc *proc_alloc(void)
 {
+    reap_threads();
     for (int i = 1; i < NPROC; i++) {
         struct proc *p = &ptable[i];
         if (p->state != PS_UNUSED)
@@ -31,6 +45,7 @@ static struct proc *proc_alloc(void)
             return NULL;
         fpu_reset(p->fpu);
         p->pid = next_pid++;
+        p->tgid = p->pid;
         p->state = PS_EMBRYO;
         p->start_tick = ticks;
 
@@ -97,6 +112,8 @@ void schedule(void)
         }
         next = &ptable[0];
     }
+    if (next == &ptable[0])
+        reap_threads();                 /* idle anyway: tidy up */
     if (next == old) {
         old->state = PS_RUNNING;
         return;
@@ -109,6 +126,8 @@ void schedule(void)
     vmm_switch(next->pd ? next->pd : kernel_pd);
     __asm__ volatile("fxsave %0" : "=m"(*(u8 (*)[512])old->fpu));
     __asm__ volatile("fxrstor %0" : : "m"(*(u8 (*)[512])next->fpu));
+    if (next->fsbase != old->fsbase)
+        set_fsbase(next->fsbase);
     switch_context(&old->ctx_sp, next->ctx_sp);
 }
 
@@ -187,9 +206,11 @@ int proc_fork(struct regs *r)
             np->ofile[i] = file_dup(cur->ofile[i]);
     np->cwd = cur->cwd;
     iref(np->cwd);
+    shm_fork(np);
     memcpy(np->name, cur->name, sizeof np->name);
-    np->ppid = cur->pid;
+    np->ppid = cur->tgid;
     np->pgid = cur->pgid;
+    np->fsbase = cur->fsbase;
     __asm__ volatile("fxsave %0" : "=m"(*(u8 (*)[512])cur->fpu));      /* the child starts with the parent's registers */
     memcpy(np->fpu, cur->fpu, sizeof np->fpu);
     *np->tf = *r;
@@ -198,8 +219,65 @@ int proc_fork(struct regs *r)
     return np->pid;
 }
 
+/* A thread: a new proc in the caller's address space, starting at entry(arg) on its own stack. */
+long sys_clone(struct regs *r, u32 entry, u32 stack, u32 arg, u32 ctid)
+{
+    if (!user_ok(entry, 1) || (stack & 15) || !user_ok(stack - 16, 16))
+        return -EINVAL;
+    struct proc *np = proc_alloc();
+    if (!np)
+        return -EAGAIN;
+    np->thread = 1;
+    np->tgid = cur->tgid;
+    np->pd = cur->pd;
+    np->brk = cur->brk;
+    np->brk_start = cur->brk_start;
+    for (int i = 0; i < NOFILE; i++)
+        if (cur->ofile[i])
+            np->ofile[i] = file_dup(cur->ofile[i]);
+    np->cwd = cur->cwd;
+    iref(np->cwd);
+    memcpy(np->name, cur->name, sizeof np->name);
+    np->ppid = cur->tgid;
+    np->pgid = cur->pgid;
+    np->clear_tid = ctid;
+    np->fsbase = cur->fsbase;
+    *np->tf = *r;
+    np->tf->rip = entry;
+    np->tf->rsp = stack - 8;            /* as if called: rsp % 16 == 8 */
+    np->tf->rdi = arg;
+    np->tf->rax = 0;
+    np->state = PS_RUNNABLE;
+    return np->pid;
+}
+
+static void thread_exit(void)
+{
+    for (int i = 0; i < NOFILE; i++)
+        if (cur->ofile[i]) {
+            file_close(cur->ofile[i]);
+            cur->ofile[i] = NULL;
+        }
+    if (cur->cwd) {
+        iput(cur->cwd);
+        cur->cwd = NULL;
+    }
+    thread_exit_notify(cur);
+    shm_release_all(cur);
+    u64 *pd = cur->pd;
+    cur->pd = NULL;
+    vmm_switch(kernel_pd);
+    if (!pd_users(pd, cur))
+        vmm_free_pd(pd);                /* the last thread out frees the address space */
+    cur->state = PS_ZOMBIE;
+    schedule();
+    panic("finished thread was rescheduled");
+}
+
 void proc_exit(int status)
 {
+    if (cur->thread)
+        thread_exit();
     if (cur->pid == 1)
         panic("init exited with status %d", status);
     if (cur->pid == gfx_owner)
@@ -231,8 +309,11 @@ void proc_exit(int status)
     }
 
     cur->exit_status = status;
+    shm_release_all(cur);
+    kill_sharers(cur->pd, cur);         /* the process's threads end with it */
     vmm_switch(kernel_pd);              /* we're about to free our own address space */
-    vmm_free_pd(cur->pd);
+    if (!pd_users(cur->pd, cur))
+        vmm_free_pd(cur->pd);
     cur->pd = NULL;
     cur->state = PS_ZOMBIE;
 
@@ -249,7 +330,7 @@ int proc_wait(int *status, int flags)
         int havekids = 0;
         for (int i = 1; i < NPROC; i++) {
             struct proc *p = &ptable[i];
-            if (p->state == PS_UNUSED || p->ppid != cur->pid)
+            if (p->state == PS_UNUSED || p->ppid != cur->tgid || p->thread)
                 continue;
             havekids = 1;
             if (p->state == PS_ZOMBIE) {

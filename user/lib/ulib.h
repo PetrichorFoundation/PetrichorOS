@@ -1,4 +1,7 @@
 #pragma once
+#ifdef __cplusplus
+extern "C" {
+#endif
 #include "types.h"
 #include "abi.h"
 #include "string.h"
@@ -46,9 +49,19 @@ int netinfo(struct netinfo *ni);
 int ping(u32 ip, u32 timeout_ms);            /* round-trip time in ticks (10 ms) */
 int settimeout(int fd, u32 ms);
 int poll(struct pollfd *fds, int n, int timeout_ms);   /* timeout < 0: wait forever */
+long shm(int op, u32 a);                                   /* shared memory buffers (SHM_* in abi.h) */
 int fbmap(struct fbinfo *fb, u32 w, u32 h);            /* fb == NULL: back to text mode */
 int gettime(struct rtc_time *t);
 int drives(struct driveinfo *out, int max);          /* number of disks found */
+long futex(u32 *addr, int op, u32 val, u32 timeout_ms); /* FUTEX_* in abi.h */
+int settls(void *p);
+int gettid(void);
+
+/* memory mappings (anonymous, zeroed); MAP_FAILED on error */
+#define MAP_FAILED ((void *)-1)
+void *mmap(u32 len, int prot);
+int munmap(void *addr, u32 len);
+int mprotect(void *addr, u32 len, int prot);
 
 /* libc-ish helpers (user/lib/ulib.c) */
 int wait(int *status);
@@ -82,3 +95,7 @@ void conn_close(struct conn *c);
 int http_get(const char *url, char **body, int *len);   /* body is malloc'd, NUL-terminated */
 void url_resolve(const char *base, const char *ref, char *out, int outsz);   /* ref relative to base, "../" aware */
 int read_line(int fd, char *buf, int max);   /* returns length, or -1 at EOF */
+
+#ifdef __cplusplus
+}
+#endif

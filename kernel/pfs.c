@@ -70,6 +70,8 @@ static struct buf *getbuf(u32 blk, int read)
         struct buf *b = &bufs[i];
         if (b->valid && b->blk == blk) {
             b->stamp = ++stamp;
+            if (!read)                          /* a freshly allocated block: never hand back what it held before */
+                memset(b->data, 0, BLK);
             return b;
         }
         /* evict an unused buffer if there is one, else the least recently used */

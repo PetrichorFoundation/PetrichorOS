@@ -117,6 +117,11 @@ struct proc {
     struct inode *cwd;
     char name[16];
     u32 start_tick, cpu_ticks;
+    u32 shm_mask;                                /* shared-memory buffers mapped (shm.c), bit = id */
+    int thread;                                  /* a thread made by clone: shares pd with its process (vm.c) */
+    int tgid;                                    /* the process (thread group) this belongs to */
+    u32 clear_tid;                               /* user address zeroed and futex-woken when the thread exits */
+    u64 fsbase;                                  /* thread-local storage pointer */
 };
 
 extern struct proc ptable[NPROC];
@@ -364,6 +369,25 @@ int exec_into(struct proc *p, struct inode *ip, int argc, char **argv);
 /* acpi.c */
 void acpi_poweroff(void);
 void acpi_reset(void);
+
+/* shm.c */
+long sys_shm(int op, u32 a);
+void shm_fork(struct proc *child);
+void shm_release_all(struct proc *p);
+
+/* vm.c: mmap and threads */
+#define MMAP_BASE 0xAF000000u                    /* between the shared-memory slots and the stack */
+#define MMAP_TOP  0xBF000000u
+long sys_mmap(u32 len, u32 prot);
+long sys_munmap(u32 addr, u32 len);
+long sys_mprotect(u32 addr, u32 len, u32 prot);
+long sys_clone(struct regs *r, u32 entry, u32 stack, u32 arg, u32 ctid);
+long sys_futex(u32 addr, int op, u32 val, u32 ms);
+int pd_users(u64 *pd, struct proc *except);      /* live threads besides `except` using this address space */
+void kill_sharers(u64 *pd, struct proc *except);
+void thread_exit_notify(struct proc *p);
+void set_fsbase(u64 v);
+int vmm_set_rw(u64 *pd, u32 va, int rw);
 
 /* syscall.c */
 int syscall_dispatch(struct regs *r);

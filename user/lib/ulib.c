@@ -4,9 +4,18 @@
 /* Program entry: the kernel leaves {fake return, argc, argv} on the stack. */
 int main(int argc, char **argv);
 
+/* Static constructors (C++ globals, __attribute__((constructor))) run before main, from user.ld's tables. */
+typedef void (*initfn)(void);
+extern initfn __init_array_start[], __init_array_end[];
+void __cxa_finalize(void *dso);
+
 void _start(int argc, char **argv)
 {
-    exit(main(argc, argv));
+    for (initfn *f = __init_array_start; f < __init_array_end; f++)
+        (*f)();
+    int r = main(argc, argv);
+    __cxa_finalize(0);                   /* C++ static destructors and atexit handlers (cxxrt.c) */
+    exit(r);
 }
 
 int wait(int *status)
@@ -183,16 +192,63 @@ const char *strerror(int err)
 
 /* ---------------- malloc: first fit over sbrk ---------------- */
 
-struct mblock {
+struct mblock {                      /* 16 bytes, so every block's data is 16-byte aligned (SSE code relies on it) */
     u32 size;
     u32 free;
     struct mblock *next;
-    u32 pad;
 };
+_Static_assert(sizeof(struct mblock) == 16, "malloc headers must keep 16-byte alignment");
 
 static struct mblock *mhead, *mtail;
 
+/* Once a program starts a thread (pthread.c sets this), malloc and free take a futex lock. */
+volatile int __ulib_threaded;
+static volatile u32 mlock;
+
+static void heap_lock(void)
+{
+    if (!__ulib_threaded)
+        return;
+    u32 c = 0;
+    if (__atomic_compare_exchange_n(&mlock, &c, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+        return;
+    if (c != 2)
+        c = __atomic_exchange_n(&mlock, 2, __ATOMIC_ACQUIRE);
+    while (c) {
+        futex((u32 *)&mlock, FUTEX_WAIT, 2, 0);
+        c = __atomic_exchange_n(&mlock, 2, __ATOMIC_ACQUIRE);
+    }
+}
+
+static void heap_unlock(void)
+{
+    if (!mlock)                          /* not threaded: never taken */
+        return;
+    if (__atomic_fetch_sub(&mlock, 1, __ATOMIC_RELEASE) != 1) {
+        __atomic_store_n(&mlock, 0, __ATOMIC_RELEASE);
+        futex((u32 *)&mlock, FUTEX_WAKE, 1, 0);
+    }
+}
+
+static void *malloc_locked(u32 n);
+static void free_locked(void *p);
+
 void *malloc(u32 n)
+{
+    heap_lock();
+    void *p = malloc_locked(n);
+    heap_unlock();
+    return p;
+}
+
+void free(void *p)
+{
+    heap_lock();
+    free_locked(p);
+    heap_unlock();
+}
+
+static void *malloc_locked(u32 n)
 {
     n = (n + 15) & ~15u;
     if (!n)
@@ -237,7 +293,7 @@ void *malloc(u32 n)
     return b + 1;
 }
 
-void free(void *p)
+static void free_locked(void *p)
 {
     if (!p)
         return;
@@ -266,13 +322,17 @@ void *realloc(void *p, u32 n)
 {
     if (!p)
         return malloc(n);
+    heap_lock();
     struct mblock *b = (struct mblock *)p - 1;
-    if (b->size >= n)
+    if (b->size >= n) {
+        heap_unlock();
         return p;
-    void *q = malloc(n);
+    }
+    void *q = malloc_locked(n);
     if (q) {
         memcpy(q, p, b->size);
-        free(p);
+        free_locked(p);
     }
+    heap_unlock();
     return q;
 }

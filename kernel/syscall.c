@@ -163,6 +163,9 @@ static int sys_sbrk(int n)
             vmm_unmap(cur->pd, va);
     }
     cur->brk = new;
+    for (int i = 1; i < NPROC; i++)             /* threads share the heap */
+        if (ptable[i].pd == cur->pd && ptable[i].state != PS_UNUSED)
+            ptable[i].brk = new;
     return old;
 }
 
@@ -336,7 +339,7 @@ int syscall_dispatch(struct regs *r)
     case SYS_exec:
         return sys_exec(a, b);
     case SYS_getpid:
-        return cur->pid;
+        return cur->tgid;
     case SYS_sbrk:
         return sys_sbrk((int)a);
     case SYS_sleep:
@@ -540,6 +543,24 @@ int syscall_dispatch(struct regs *r)
         rtc_read((struct rtc_time *)(uptr)a);
         return 0;
     }
+    case SYS_shm:
+        return sys_shm((int)a, (u32)b);
+    case SYS_mmap:
+        return sys_mmap(a, b);
+    case SYS_munmap:
+        return sys_munmap(a, b);
+    case SYS_mprotect:
+        return sys_mprotect(a, b, c);
+    case SYS_clone:
+        return sys_clone(r, a, b, c, d);
+    case SYS_futex:
+        return sys_futex(a, (int)b, c, d);
+    case SYS_settls:
+        cur->fsbase = (u64)r->rdi;
+        set_fsbase(cur->fsbase);
+        return 0;
+    case SYS_gettid:
+        return cur->pid;
     case SYS_drives: {
         int max = b < 0 ? 0 : b > MAXDRIVES ? MAXDRIVES : b, n = 0;
         if (!user_ok(a, max * sizeof(struct driveinfo)))

@@ -106,8 +106,18 @@ static int exec_image(struct proc *p, struct inode *ip, const u8 *img, int argc,
     p->pd = pd;
     if (p == cur)
         vmm_switch(pd);
-    if (old)
-        vmm_free_pd(old);
+    if (old) {
+        shm_release_all(p);
+        kill_sharers(old, p);                   /* exec ends the other threads */
+        if (!pd_users(old, p))
+            vmm_free_pd(old);
+    }
+    p->thread = 0;                              /* an exec'd thread becomes a process of its own */
+    p->tgid = p->pid;
+    p->clear_tid = 0;
+    p->fsbase = 0;
+    if (p == cur)
+        set_fsbase(0);
 
     p->brk = p->brk_start = (maxend + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 

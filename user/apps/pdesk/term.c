@@ -2,6 +2,7 @@
  * does the line editing and echo that the kernel tty would normally do. */
 #include "desk.h"
 #include "winproto.h"
+#include "host.h"
 
 #define TCOLS  120
 #define TLINES 400
@@ -24,6 +25,7 @@ struct term {
     u8 ibuf[8192];
     int ilen;
     struct cwin *cw[MAXCW];
+    struct host hst;                             /* shared-memory windows of programs started here */
     u8 ch[TLINES][TCOLS];
     u8 col[TLINES][TCOLS];
     int cols;                    /* wrap width, follows the window */
@@ -302,6 +304,7 @@ static void cw_handle(struct term *t, const struct pw_msg *m, const u8 *payload)
         }
         break;
     case PW_TITLE:
+        if (!cw) { host_msg(&t->hst, m, payload); break; }
         if (cw && cw->win) {
             char title[64];
             int tl = m->len < 63 ? m->len : 63;
@@ -313,7 +316,13 @@ static void cw_handle(struct term *t, const struct pw_msg *m, const u8 *payload)
     case PW_DESTROY:
         if (cw && cw->win)
             wm_close(cw->win);
+        else
+            host_msg(&t->hst, m, payload);
         break;
+    default:
+        t->hst.up = t->upfd;
+        t->hst.down = t->downfd;
+        host_msg(&t->hst, m, payload);
     }
 }
 
@@ -346,6 +355,7 @@ static void cw_read(struct term *t)
 
 static void cw_close_all(struct term *t)
 {
+    host_close_all(&t->hst);
     for (int i = 0; i < MAXCW; i++)
         if (t->cw[i] && t->cw[i]->win)
             wm_close(t->cw[i]->win);

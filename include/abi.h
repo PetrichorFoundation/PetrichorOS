@@ -49,6 +49,26 @@
 #define SYS_fbmap     43
 #define SYS_gettime   44
 #define SYS_drives    45
+#define SYS_shm       46
+#define SYS_mmap      47            /* mmap(len, prot) -> address (anonymous, zeroed) */
+#define SYS_munmap    48            /* munmap(addr, len) */
+#define SYS_mprotect  49            /* mprotect(addr, len, prot) */
+#define SYS_clone     50            /* clone(entry, stack top, arg, clear_tid address) -> thread id */
+#define SYS_futex     51            /* futex(addr, op, val, timeout ms; 0 = forever) */
+#define SYS_settls    52            /* settls(address): the calling thread's %fs base */
+#define SYS_gettid    53
+
+#define PROT_NONE  0
+#define PROT_READ  1
+#define PROT_WRITE 2
+#define PROT_EXEC  4
+#define FUTEX_WAIT 0                /* sleep while *addr == val */
+#define FUTEX_WAKE 1                /* wake up to val sleepers; returns how many */
+
+#define SHM_CREATE 0                /* shm(SHM_CREATE, bytes) -> id */
+#define SHM_MAP    1                /* shm(SHM_MAP, id) -> 0; the buffer is then at SHM_ADDR(id) */
+#define SHM_ADDR(id) ((void *)(uptr)(0x90000000u + (u32)((id) - 1) * 0x01800000u))
+#define SHM_DROP   2
 
 /* input events (read from /dev/input) */
 #define INPUT_KEY   1

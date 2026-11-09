@@ -140,11 +140,12 @@ static void st_draw(struct win *w, struct rect c)
     if (s->tab == TAB_APPEARANCE) {
         gfx_text(x, y, "Wallpaper", C_TEXT);
         for (int i = 0; i < NWALL; i++) {
-            int sx = x + i * 92, sy = y + 24;
-            gfx_vgrad(sx, sy, 84, 54, gfx_mix(theme_wall_color(i), 0x000000, 90), gfx_mix(theme_wall_color(i), C_WHITE, 40));
-            gfx_frame(sx, sy, 84, 54, i == g_wall ? g_accent : RGB(0x80, 0x88, 0x90));
-            if (i == g_wall) gfx_frame(sx + 1, sy + 1, 82, 52, g_accent);
-            gfx_text(sx + 42 - gfx_text_width(theme_wall_name(i)) / 2, sy + 60, theme_wall_name(i), C_TEXT);
+            int sx = x + i * 72, sy = y + 24;
+            gfx_vgrad(sx, sy, 64, 44, gfx_mix(theme_wall_color(i), 0x000000, 90), gfx_mix(theme_wall_color(i), C_WHITE, 40));
+            int sel = i == g_wall && !g_wallpic[0];
+            gfx_frame(sx, sy, 64, 44, sel ? g_accent : RGB(0x80, 0x88, 0x90));
+            if (sel) gfx_frame(sx + 1, sy + 1, 62, 42, g_accent);
+            gfx_text(sx + 32 - gfx_text_width(theme_wall_name(i)) / 2, sy + 50, theme_wall_name(i), C_TEXT);
         }
         y += 120;
         gfx_text(x, y, "Accent color", C_TEXT);
@@ -157,7 +158,7 @@ static void st_draw(struct win *w, struct rect c)
             }
         }
         y += 90;
-        gfx_text(x, y, "Right-click the desktop and choose Change Wallpaper to cycle.", C_TEXT_DIM);
+        gfx_text(x, y, g_wallpic[0] ? "Using a picture. Pick a tile to go back, or open another image and press W." : "For a picture: open it in the image viewer and press W.", C_TEXT_DIM);
         radio(x, y + 30, g_animations, "Animate windows, menus and the dock");
     } else if (s->tab == TAB_DISPLAY) {
         draw_display(x, y);
@@ -253,9 +254,10 @@ static void st_mouse(struct win *w, int x, int y, int kind)
     }
     int cx = x - SIDE_W - 20, cy = y - 18;
     if (s->tab == TAB_APPEARANCE) {
-        if (cy >= 24 && cy < 78) {
-            int i = cx / 92;
-            if (i >= 0 && i < NWALL && cx % 92 < 84 && i != g_wall) {
+        if (cy >= 24 && cy < 68) {
+            int i = cx / 72;
+            if (i >= 0 && i < NWALL && cx % 72 < 64 && (i != g_wall || g_wallpic[0])) {
+                g_wallpic[0] = 0;
                 theme_set(i, g_accent_idx);
                 wm_invalidate(w);
             }

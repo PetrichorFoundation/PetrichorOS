@@ -1,5 +1,5 @@
 /* Image decoders (PNG, JPEG baseline + progressive, GIF) and box-filter scaling. */
-#include "web.h"
+#include "img.h"
 
 #define MAX_PIXELS (8 * 1000 * 1000)
 

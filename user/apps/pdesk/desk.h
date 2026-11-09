@@ -76,7 +76,7 @@ void wm_notify(const char *msg);                            /* a toast in the co
 int wm_installer_available(void);                           /* a second disk we could install to */
 
 /* themes (main.c) */
-#define NWALL   5
+#define NWALL   7
 #define NACCENT 6
 extern int g_wall, g_accent_idx;
 extern int g_animations;                                    /* window and menu animations on/off */
@@ -94,7 +94,9 @@ void anim_set(int on);                                      /* applies and saves
 const char *theme_wall_name(int i);
 u32 theme_wall_color(int i);
 u32 theme_accent_color(int i);
-void theme_set(int wall, int accent_idx);                   /* applies and saves */
+void theme_set(int wall, int accent_idx);                   /* applies and saves (and drops a picture wallpaper) */
+extern char g_wallpic[128];                                  /* a picture used as the wallpaper ("" = none) */
+int wallpaper_set_picture(const char *path);                 /* 0 if the image loaded; applies and saves */
 
 /* clipboard (main.c): shared by every app in the desktop */
 void clip_set(const char *text, int len);

@@ -1,7 +1,7 @@
 /* Image viewer: PNG, JPEG and GIF, fitted to the window.  Left/Right (or clicking the right/left half) step
  * through the other images in the folder; Esc closes. */
 #include "desk.h"
-#include "web.h"
+#include "img.h"
 
 #define BAR_H 26
 
@@ -122,7 +122,7 @@ static void vw_draw(struct win *w, struct rect c)
     gfx_fill(c.x, c.y + ah, c.w, BAR_H, RGB(0x30, 0x34, 0x3a));
     char t[160];
     if (v->img)
-        snprintf(t, sizeof t, "%d x %d    Left/Right: other images in this folder", v->img->w, v->img->h);
+        snprintf(t, sizeof t, "%d x %d    Left/Right: other images    W: set as wallpaper", v->img->w, v->img->h);
     else
         snprintf(t, sizeof t, "Left/Right: other images in this folder");
     gfx_text(c.x + 8, c.y + ah + 5, t, RGB(0xc8, 0xcc, 0xd0));
@@ -135,6 +135,8 @@ static void vw_key(struct win *w, struct input_event *e)
         step(v, 1);
     else if (e->code == KEY_LEFT || e->code == 8)
         step(v, -1);
+    else if ((e->code == 'w' || e->code == 'W') && v->img)
+        wm_notify(wallpaper_set_picture(v->path) == 0 ? "Wallpaper set" : "Couldn't use this image as wallpaper");
     else if (e->code == 27)
         wm_close(w);
 }

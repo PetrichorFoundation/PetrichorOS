@@ -58,3 +58,11 @@ SYSCALL poll, SYS_poll
 SYSCALL fbmap, SYS_fbmap
 SYSCALL gettime, SYS_gettime
 SYSCALL drives, SYS_drives
+SYSCALL shm, SYS_shm
+SYSCALL __mmap, SYS_mmap
+SYSCALL __munmap, SYS_munmap
+SYSCALL __mprotect, SYS_mprotect
+SYSCALL __clone, SYS_clone
+SYSCALL futex, SYS_futex
+SYSCALL settls, SYS_settls
+SYSCALL gettid, SYS_gettid
